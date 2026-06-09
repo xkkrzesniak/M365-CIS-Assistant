@@ -219,23 +219,20 @@ function Invoke-CISDeviceConnect {
 # Logowanie do Graph przez MSAL.NET bezposrednio - omija Connect-MgGraph auth (problemy z WAM/runspace).
 # Uzywamy Microsoft Graph Command Line Tools (publiczny klient MS, delegated, kazdy tenant).
 # AcquireTokenInteractive otwiera przegladarke systemowa (nie WAM, nie embedded browser).
-function Connect-CISGraphInteractive {
-    param([string[]]$Scopes)
-    Write-CISLog 'Logowanie do Microsoft Graph (przeglądarka)...' INFO
+# ---------- MSAL HELPERS ----------
 
+function Initialize-CISMsal {
     # Upewnij sie ze MSAL.NET jest zaladowany (moze byc lazy-loaded przez Graph modul)
     $msalAsm = [System.AppDomain]::CurrentDomain.GetAssemblies() |
         Where-Object { $_.GetName().Name -eq 'Microsoft.Identity.Client' } |
         Select-Object -First 1
     if (-not $msalAsm) {
-        # Szukaj DLL w katalogach modulow Microsoft.Graph.*
         $msalDll = Get-Module -Name 'Microsoft.Graph.*' |
             Select-Object -ExpandProperty ModuleBase -ErrorAction SilentlyContinue |
             ForEach-Object { Get-ChildItem $_ -Recurse -Filter 'Microsoft.Identity.Client.dll' -ErrorAction SilentlyContinue } |
             Sort-Object { [version]$_.VersionInfo.FileVersion } -Descending |
             Select-Object -First 1
         if (-not $msalDll) {
-            # Szukaj w PSModulePath
             $msalDll = ($env:PSModulePath -split ';') |
                 ForEach-Object { Get-ChildItem $_ -Recurse -Filter 'Microsoft.Identity.Client.dll' -ErrorAction SilentlyContinue } |
                 Sort-Object { [version]$_.VersionInfo.FileVersion } -Descending |
@@ -247,58 +244,60 @@ function Connect-CISGraphInteractive {
             throw 'Nie znaleziono Microsoft.Identity.Client.dll. Zainstaluj Microsoft.Graph: Install-Module Microsoft.Graph -Scope CurrentUser'
         }
     }
-
     if (-not $script:MsalApp) {
-        # Publiczny klient Microsoft (Graph Command Line Tools) - nie wymaga rejestracji aplikacji
-        # http://localhost jako redirect - standardowy dla natywnych aplikacji desktopowych
         $script:MsalApp = [Microsoft.Identity.Client.PublicClientApplicationBuilder]::Create('14d82eec-204b-4c2f-b7e8-296a70dab67e').
             WithAuthority('https://login.microsoftonline.com/organizations').
             WithRedirectUri('http://localhost').
             Build()
     }
+}
 
-    # Sprobuj cicho (token z cache), jesli nie ma - interaktywna przeglądarka
+# Pobierz access token przez MSAL (silent z cache lub interaktywna przeglądarka)
+function Get-CISMsalToken {
+    param([string[]]$Scopes, [string]$Label = 'Microsoft 365')
+
+    Initialize-CISMsal
+
     $accounts = $script:MsalApp.GetAccountsAsync().GetAwaiter().GetResult()
     $task = $null
     if ($accounts) {
         try {
-            $silentReq = $script:MsalApp.AcquireTokenSilent($Scopes, ($accounts | Select-Object -First 1))
-            $task = $silentReq.ExecuteAsync()
-            $task.Wait(5000) | Out-Null
+            $task = $script:MsalApp.AcquireTokenSilent($Scopes, ($accounts | Select-Object -First 1)).ExecuteAsync()
+            $task.Wait(8000) | Out-Null
             if ($task.IsFaulted) { $task = $null }
         } catch { $task = $null }
     }
     if (-not $task -or -not $task.IsCompleted -or $task.IsFaulted) {
-        Write-CISLog 'Otwieram przegladarke do logowania Microsoft 365...' INFO
-        # WithUseEmbeddedWebView($false) = systemowa przegladarka, bez embedded WebBrowser
-        $task = $script:MsalApp.AcquireTokenInteractive($Scopes).
-            WithUseEmbeddedWebView($false).
-            ExecuteAsync()
+        Write-CISLog "Otwieram przegladarke do logowania ($Label)..." INFO
+        $task = $script:MsalApp.AcquireTokenInteractive($Scopes).WithUseEmbeddedWebView($false).ExecuteAsync()
+        if ([System.Windows.Application]::Current) {
+            $dcFrame  = [System.Windows.Threading.DispatcherFrame]::new()
+            $deadline = [DateTime]::UtcNow.AddMinutes(10)
+            $dcTimer  = [System.Windows.Threading.DispatcherTimer]::new()
+            $dcTimer.Interval = [TimeSpan]::FromMilliseconds(300)
+            $dcTimer.Add_Tick({
+                if ($task.IsCompleted -or $task.IsFaulted -or $task.IsCanceled -or [DateTime]::UtcNow -gt $deadline) {
+                    $dcTimer.Stop(); $dcFrame.Continue = $false
+                }
+            }.GetNewClosure())
+            $dcTimer.Start()
+            [System.Windows.Threading.Dispatcher]::PushFrame($dcFrame)
+        } else {
+            $task.Wait([TimeSpan]::FromMinutes(10)) | Out-Null
+        }
     }
 
-    # Czekaj na token przez DispatcherFrame (UI pozostaje responsywne)
-    if ([System.Windows.Application]::Current) {
-        $dcFrame   = [System.Windows.Threading.DispatcherFrame]::new()
-        $deadline  = [DateTime]::UtcNow.AddMinutes(10)
-        $dcTimer   = [System.Windows.Threading.DispatcherTimer]::new()
-        $dcTimer.Interval = [TimeSpan]::FromMilliseconds(300)
-        $dcTimer.Add_Tick({
-            if ($task.IsCompleted -or $task.IsFaulted -or $task.IsCanceled -or
-                [DateTime]::UtcNow -gt $deadline) {
-                $dcTimer.Stop(); $dcFrame.Continue = $false
-            }
-        }.GetNewClosure())
-        $dcTimer.Start()
-        [System.Windows.Threading.Dispatcher]::PushFrame($dcFrame)
-    } else {
-        $task.Wait([TimeSpan]::FromMinutes(10)) | Out-Null
-    }
+    if ($task.IsFaulted)       { throw $task.Exception.GetBaseException() }
+    if ($task.IsCanceled)      { throw "Logowanie $Label anulowane." }
+    if (-not $task.IsCompleted){ throw "Timeout logowania $Label (10 min)." }
+    return $task.Result.AccessToken
+}
 
-    if ($task.IsFaulted)      { throw $task.Exception.GetBaseException() }
-    if ($task.IsCanceled)     { throw 'Logowanie anulowane.' }
-    if (-not $task.IsCompleted) { throw 'Timeout logowania (10 min).' }
-
-    $secToken = ConvertTo-SecureString $task.Result.AccessToken -AsPlainText -Force
+function Connect-CISGraphInteractive {
+    param([string[]]$Scopes)
+    Write-CISLog 'Logowanie do Microsoft Graph (przeglądarka)...' INFO
+    $token = Get-CISMsalToken -Scopes $Scopes -Label 'Microsoft Graph'
+    $secToken = ConvertTo-SecureString $token -AsPlainText -Force
     Connect-MgGraph -AccessToken $secToken -NoWelcome -ErrorAction Stop
     Write-CISLog 'Microsoft Graph - polaczono.' OK
 }
@@ -366,18 +365,12 @@ function Connect-CISServices {
     }
     if (-not $SkipExchange) {
         Confirm-CISModule 'ExchangeOnlineManagement' -MinVersion '3.2.0'
-        # Runtime check: jesli zaladowana wersja nadal nie ma parametru -Device, wymus aktualizacje
-        if (-not (Get-Command Connect-ExchangeOnline -ErrorAction SilentlyContinue).Parameters.ContainsKey('Device')) {
-            Write-CISLog 'Zaladowana wersja EXO nie ma parametru -Device; wymuszam aktualizacje...' WARN
-            Install-Module ExchangeOnlineManagement -Scope CurrentUser -Force -AllowClobber -ErrorAction SilentlyContinue
-            Import-Module ExchangeOnlineManagement -Force -ErrorAction SilentlyContinue
-        }
-        # Wybierz NAJWYZSZA zaladowana wersje - Get-Module moze zwracac array gdy zaladowano wiele wersji
         $exoMod = Get-Module ExchangeOnlineManagement | Sort-Object Version -Descending | Select-Object -First 1
         $script:ExoModFile = $exoMod.Path
-        $exoLoad = if ($script:ExoModFile) { "Import-Module '$($script:ExoModFile)' -Force -ErrorAction Stop" } else { "Import-Module ExchangeOnlineManagement -Force -ErrorAction Stop" }
-        Write-CISLog "Lacze z Exchange Online (EXO v$($exoMod.Version), kod urzadzenia)..."
-        Invoke-CISDeviceConnect -ServiceName 'Exchange Online' -ConnectInvoke "$exoLoad`nConnect-ExchangeOnline -ShowBanner:`$false -Device -ErrorAction Stop"
+        Write-CISLog "Lacze z Exchange Online (EXO v$($exoMod.Version), token OAuth)..." INFO
+        # EXO token - ten sam MsalApp co Graph, SSO wiec zazwyczaj bez dodatkowego okna przegladarki
+        $exoToken = Get-CISMsalToken -Scopes @('https://outlook.office365.com/.default') -Label 'Exchange Online'
+        Connect-ExchangeOnline -AccessToken $exoToken -Organization $script:Ctx.TenantInitialDomain -ShowBanner:$false -ErrorAction Stop
         $script:Ctx.Connected.EXO = $true
         try { Enable-OrganizationCustomization -ErrorAction SilentlyContinue } catch { }
         $script:Ctx.AcceptedDomains = (Get-AcceptedDomain).Name
@@ -408,15 +401,12 @@ function Connect-CISServices {
     }
     if (-not $SkipPurview) {
         # ExchangeOnlineManagement dostarcza Connect-IPPSSession (Security & Compliance / Purview)
-        $exoLoaded = Get-Module 'ExchangeOnlineManagement' | Sort-Object Version -Descending | Select-Object -First 1
-        if (-not $exoLoaded -or ([version]$exoLoaded.Version -lt [version]'3.2.0')) {
+        if (-not $script:ExoModFile) {
             Confirm-CISModule 'ExchangeOnlineManagement' -MinVersion '3.2.0'
-            $exoLoaded = Get-Module 'ExchangeOnlineManagement' | Sort-Object Version -Descending | Select-Object -First 1
         }
-        $purviewModFile = if ($script:ExoModFile) { $script:ExoModFile } else { $exoLoaded.Path }
-        $purviewLoad = if ($purviewModFile) { "Import-Module '$purviewModFile' -Force -ErrorAction Stop" } else { "Import-Module ExchangeOnlineManagement -Force -ErrorAction Stop" }
-        Write-CISLog 'Lacze z Microsoft Purview (kod urzadzenia)...' INFO
-        Invoke-CISDeviceConnect -ServiceName 'Purview' -ConnectInvoke "$purviewLoad`nConnect-IPPSSession -ShowBanner:`$false -Device -ErrorAction Stop"
+        Write-CISLog 'Lacze z Microsoft Purview / Security & Compliance (token OAuth)...' INFO
+        $purviewToken = Get-CISMsalToken -Scopes @('https://ps.compliance.protection.outlook.com/.default') -Label 'Purview'
+        Connect-IPPSSession -AccessToken $purviewToken -Organization $script:Ctx.TenantInitialDomain -ShowBanner:$false -ErrorAction Stop
         $script:Ctx.Connected.Purview = $true
     }
     return $script:Ctx
