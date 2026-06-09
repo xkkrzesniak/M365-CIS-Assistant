@@ -137,6 +137,171 @@ function Show-DeviceCodeDialog {
     return [scriptblock]::Create('$dcWin.Close()').GetNewClosure()
 }
 
+# --- Okno wyboru / tworzenia konta Break-Glass ---
+function Show-BGADialog {
+    $bgaXaml = @'
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Konto Break-Glass" Width="680" Height="580"
+        WindowStartupLocation="CenterScreen" ResizeMode="CanResizeWithGrip"
+        FontFamily="Segoe UI" FontSize="13" Background="#f4f6f9" ShowInTaskbar="False">
+  <Grid Margin="0">
+    <Grid.RowDefinitions>
+      <RowDefinition Height="56"/>
+      <RowDefinition Height="*"/>
+      <RowDefinition Height="Auto"/>
+      <RowDefinition Height="Auto"/>
+      <RowDefinition Height="44"/>
+    </Grid.RowDefinitions>
+
+    <!-- Pasek tytulowy -->
+    <Border Grid.Row="0" Background="#0b5cab">
+      <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Margin="20,0">
+        <TextBlock Text="🔓" FontSize="20" Foreground="White" VerticalAlignment="Center" Margin="0,0,10,0"/>
+        <StackPanel VerticalAlignment="Center">
+          <TextBlock Text="Konto Break-Glass" Foreground="White" FontSize="14" FontWeight="Bold"/>
+          <TextBlock Text="Wybierz istniejącego Global Admina lub utwórz nowe konto" Foreground="#c5dcf0" FontSize="11"/>
+        </StackPanel>
+      </StackPanel>
+    </Border>
+
+    <!-- Lista Global Adminow -->
+    <Grid Grid.Row="1" Margin="16,12,16,4">
+      <Grid.RowDefinitions>
+        <RowDefinition Height="Auto"/>
+        <RowDefinition Height="*"/>
+        <RowDefinition Height="Auto"/>
+      </Grid.RowDefinitions>
+      <TextBlock Grid.Row="0" Text="Global Administratorzy tenanta:" FontWeight="SemiBold" Margin="0,0,0,6"/>
+      <DataGrid x:Name="dgAdmins" Grid.Row="1" AutoGenerateColumns="False" CanUserAddRows="False"
+                SelectionMode="Single" HeadersVisibility="Column" GridLinesVisibility="Horizontal"
+                Background="White" AlternatingRowBackground="#f4f7fb" RowHeaderWidth="0" IsReadOnly="True">
+        <DataGrid.Columns>
+          <DataGridTextColumn Header="Wyświetlana nazwa" Binding="{Binding DisplayName}" Width="2*"/>
+          <DataGridTextColumn Header="UPN"               Binding="{Binding UserPrincipalName}" Width="3*"/>
+          <DataGridTextColumn Header="Aktywne"           Binding="{Binding AccountEnabled}" Width="80"/>
+        </DataGrid.Columns>
+      </DataGrid>
+      <Button x:Name="btnPickExisting" Grid.Row="2" Content="✓  Wybierz jako Break-Glass" Height="30"
+              Margin="0,8,0,0" Background="#0b5cab" Foreground="White" FontWeight="Bold" IsEnabled="False"/>
+    </Grid>
+
+    <!-- Separator -->
+    <Border Grid.Row="2" BorderBrush="#ddd" BorderThickness="0,1,0,0" Margin="16,4,16,4">
+      <TextBlock Text="— lub utwórz nowe konto BGA —" HorizontalAlignment="Center"
+                 Foreground="#666" FontSize="12" Margin="0,6"/>
+    </Border>
+
+    <!-- Formularz tworzenia -->
+    <Grid Grid.Row="3" Margin="16,0,16,4">
+      <Grid.ColumnDefinitions>
+        <ColumnDefinition Width="*"/>
+        <ColumnDefinition Width="16"/>
+        <ColumnDefinition Width="*"/>
+        <ColumnDefinition Width="16"/>
+        <ColumnDefinition Width="180"/>
+      </Grid.ColumnDefinitions>
+      <Grid.RowDefinitions>
+        <RowDefinition Height="Auto"/>
+        <RowDefinition Height="Auto"/>
+      </Grid.RowDefinitions>
+      <TextBlock Grid.Row="0" Grid.Column="0" Text="Wyświetlana nazwa:" Margin="0,0,0,3"/>
+      <TextBlock Grid.Row="0" Grid.Column="2" Text="Login (UPN):" Margin="0,0,0,3"/>
+      <TextBox x:Name="txtBgaName" Grid.Row="1" Grid.Column="0" Height="28" Padding="6,4"
+               Text="Break Glass Account"/>
+      <TextBox x:Name="txtBgaUpn"  Grid.Row="1" Grid.Column="2" Height="28" Padding="6,4"
+               Text="breakglass@"/>
+      <Button x:Name="btnCreateBga" Grid.Row="1" Grid.Column="4" Content="+ Utwórz konto BGA" Height="28"
+              Background="#1a7f37" Foreground="White" FontWeight="Bold" BorderThickness="0"/>
+    </Grid>
+
+    <!-- Stopka -->
+    <Border Grid.Row="4" Background="White" BorderBrush="#ddd" BorderThickness="0,1,0,0">
+      <DockPanel Margin="16,0">
+        <Button x:Name="btnBgaCancel" DockPanel.Dock="Right" Content="Anuluj" Width="80" Height="28"
+                Margin="8,0,0,0" VerticalAlignment="Center"/>
+        <TextBlock x:Name="lblBgaStatus" Foreground="#555" FontSize="11" VerticalAlignment="Center"
+                   Text="Ładowanie listy Global Adminów…"/>
+      </DockPanel>
+    </Border>
+  </Grid>
+</Window>
+'@
+
+    [xml]$bgaXml = $bgaXaml
+    $bgaWin = [Windows.Markup.XamlReader]::Load((New-Object System.Xml.XmlNodeReader $bgaXml))
+
+    $dgAdmins      = $bgaWin.FindName('dgAdmins')
+    $btnPick       = $bgaWin.FindName('btnPickExisting')
+    $btnCreate     = $bgaWin.FindName('btnCreateBga')
+    $btnCancel     = $bgaWin.FindName('btnBgaCancel')
+    $txtName       = $bgaWin.FindName('txtBgaName')
+    $txtUpn        = $bgaWin.FindName('txtBgaUpn')
+    $lblStatus     = $bgaWin.FindName('lblBgaStatus')
+
+    $script:BgaResult = $null
+
+    # Zaladuj Global Adminow
+    try {
+        $admins = Get-CISGlobalAdmins
+        $dgAdmins.ItemsSource = $admins
+        $lblStatus.Text = "Znaleziono $(@($admins).Count) Global Administratorów."
+    } catch {
+        $lblStatus.Text = "Blad pobierania administratorow: $($_.Exception.Message)"
+    }
+
+    # Sugestia domeny UPN
+    try {
+        $ctx = Get-CISContext
+        if ($ctx.TenantInitialDomain) { $txtUpn.Text = "breakglass@$($ctx.TenantInitialDomain)" }
+    } catch { }
+
+    $dgAdmins.Add_SelectionChanged({
+        $btnPick.IsEnabled = ($dgAdmins.SelectedItem -ne $null)
+    })
+
+    $btnPick.Add_Click({
+        $sel = $dgAdmins.SelectedItem
+        if (-not $sel) { return }
+        try {
+            $script:BgaResult = Get-MgUser -UserId $sel.Id -ErrorAction Stop
+        } catch {
+            $script:BgaResult = $sel
+        }
+        $bgaWin.DialogResult = $true
+    })
+
+    $btnCreate.Add_Click({
+        $upn  = $txtUpn.Text.Trim()
+        $name = $txtName.Text.Trim()
+        if (-not $upn -or $upn -eq 'breakglass@') {
+            [System.Windows.MessageBox]::Show('Wpisz pełny adres UPN dla nowego konta.','Brak UPN','OK','Warning') | Out-Null
+            return
+        }
+        try {
+            $btnCreate.IsEnabled = $false
+            $lblStatus.Text = "Tworzenie konta $upn…"
+            $bgaWin.Dispatcher.Invoke([action]{}, 'Background')
+            $res = New-CISBreakGlassAccount -UserPrincipalName $upn -DisplayName $name
+            [System.Windows.MessageBox]::Show(
+                "Konto utworzone!`n`nLogin:    $upn`nHasło:   $($res.Password)`n`nZapisz hasło teraz — nie będzie już dostępne.",
+                'Konto BGA utworzone', 'OK', 'Information'
+            ) | Out-Null
+            $script:BgaResult = $res.User
+            $bgaWin.DialogResult = $true
+        } catch {
+            $btnCreate.IsEnabled = $true
+            $lblStatus.Text = "Blad tworzenia: $($_.Exception.Message)"
+            [System.Windows.MessageBox]::Show($_.Exception.Message,'Blad tworzenia konta','OK','Error') | Out-Null
+        }
+    })
+
+    $btnCancel.Add_Click({ $bgaWin.DialogResult = $false })
+
+    $bgaWin.ShowDialog() | Out-Null
+    return $script:BgaResult
+}
+
 # --- Stan aplikacji ---
 $script:AllRows    = New-Object System.Collections.ObjectModel.ObservableCollection[object]   # pelna lista
 $script:View       = New-Object System.Collections.ObjectModel.ObservableCollection[object]   # widoczne (po filtrze)
@@ -178,11 +343,12 @@ $xamlText = @'
           <ComboBoxItem Content="ReportOnly" IsSelected="True"/>
           <ComboBoxItem Content="Enabled"/>
         </ComboBox>
-        <CheckBox x:Name="chkSkipEntra"  Content="Skip Entra"  Margin="0,0,10,0" VerticalAlignment="Center"/>
-        <CheckBox x:Name="chkSkipExo"    Content="Skip Exchange" Margin="0,0,10,0" VerticalAlignment="Center"/>
-        <CheckBox x:Name="chkSkipSpo"    Content="Skip SharePoint" Margin="0,0,10,0" VerticalAlignment="Center"/>
-        <CheckBox x:Name="chkSkipTeams"  Content="Skip Teams" Margin="0,0,10,0" VerticalAlignment="Center"/>
-        <CheckBox x:Name="chkSkipIntune" Content="Skip Intune" Margin="0,0,16,0" VerticalAlignment="Center"/>
+        <CheckBox x:Name="chkSkipEntra"   Content="Skip Entra"       Margin="0,0,10,0" VerticalAlignment="Center"/>
+        <CheckBox x:Name="chkSkipExo"     Content="Skip Exchange"    Margin="0,0,10,0" VerticalAlignment="Center"/>
+        <CheckBox x:Name="chkSkipSpo"     Content="Skip SharePoint"  Margin="0,0,10,0" VerticalAlignment="Center"/>
+        <CheckBox x:Name="chkSkipTeams"   Content="Skip Teams"       Margin="0,0,10,0" VerticalAlignment="Center"/>
+        <CheckBox x:Name="chkSkipIntune"  Content="Skip Intune"      Margin="0,0,10,0" VerticalAlignment="Center"/>
+        <CheckBox x:Name="chkSkipPurview" Content="Skip Purview"     Margin="0,0,16,0" VerticalAlignment="Center"/>
         <Button x:Name="btnConnect" Content="1. Polacz z tenantem" Width="170" Height="28" Background="#0b5cab" Foreground="White" FontWeight="Bold"/>
       </WrapPanel>
     </Border>
@@ -254,7 +420,7 @@ $win = [Windows.Markup.XamlReader]::Load($reader)
 
 # --- Uchwyty kontrolek ---
 $ctrl = @{}
-'lblTenant','lblBg','cmbCaState','chkSkipEntra','chkSkipExo','chkSkipSpo','chkSkipTeams','chkSkipIntune',
+'lblTenant','lblBg','cmbCaState','chkSkipEntra','chkSkipExo','chkSkipSpo','chkSkipTeams','chkSkipIntune','chkSkipPurview',
 'btnConnect','cmbLevel','cmbStatus','txtSearch','cmbProfile','btnApplyProfile','btnSaveProfile','btnSelAll',
 'btnSelNone','grid','chkWhatIf','btnScan','btnApply','btnReport','lblStatus','txtLog' | ForEach-Object {
     $ctrl[$_] = $win.FindName($_)
@@ -305,16 +471,16 @@ $ctrl.btnConnect.Add_Click({
         $state = Get-Combo $ctrl.cmbCaState
         Connect-CISServices -SkipEntra:$ctrl.chkSkipEntra.IsChecked -SkipExchange:$ctrl.chkSkipExo.IsChecked `
             -SkipSharePoint:$ctrl.chkSkipSpo.IsChecked -SkipTeams:$ctrl.chkSkipTeams.IsChecked `
-            -SkipIntune:$ctrl.chkSkipIntune.IsChecked -ConditionalAccessState $state | Out-Null
+            -SkipIntune:$ctrl.chkSkipIntune.IsChecked -SkipPurview:$ctrl.chkSkipPurview.IsChecked `
+            -ConditionalAccessState $state | Out-Null
         $c = Get-CISContext
         $ctrl.lblTenant.Text = "   Tenant: " + $(if($c.TenantInitialDomain){$c.TenantInitialDomain}else{'(nieznany)'})
         # Wymuszony break-glass
         if ($c.Connected.Graph) {
             Set-Status 'Wybierz konto break-glass...'
-            $users = Get-CISUsers
-            $pick = $users | Out-GridView -Title 'Wybierz konto BREAK-GLASS (wykluczane z CA) i kliknij OK' -OutputMode Single
+            $pick = Show-BGADialog
             if ($pick) {
-                $script:BgUser = Get-MgUser -UserId $pick.Id -ErrorAction SilentlyContinue
+                $script:BgUser = $pick
                 Set-CISBreakGlass -User $script:BgUser | Out-Null
                 $ctrl.lblBg.Text = "   Break-glass: " + $script:BgUser.UserPrincipalName
             } else {

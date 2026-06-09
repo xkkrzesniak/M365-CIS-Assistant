@@ -52,7 +52,7 @@ function Reset-CISContext {
         TenantName=$null; TenantInitialDomain=$null; TenantId=$null; TenantDisplayName=$null
         AcceptedDomains=@()
         CaState='enabledForReportingButNotEnforced'
-        Connected=@{ Graph=$false; EXO=$false; SPO=$false; Teams=$false; Intune=$false }
+        Connected=@{ Graph=$false; EXO=$false; SPO=$false; Teams=$false; Intune=$false; Purview=$false }
     }
     return $script:Ctx
 }
@@ -62,7 +62,8 @@ function Get-CISContext { if (-not $script:Ctx) { Reset-CISContext | Out-Null };
 function Connect-CISServices {
     [CmdletBinding()]
     param(
-        [switch]$SkipEntra, [switch]$SkipExchange, [switch]$SkipSharePoint, [switch]$SkipTeams, [switch]$SkipIntune,
+        [switch]$SkipEntra, [switch]$SkipExchange, [switch]$SkipSharePoint,
+        [switch]$SkipTeams, [switch]$SkipIntune, [switch]$SkipPurview,
         [string]$TenantDomain,
         [ValidateSet('ReportOnly','Enabled')][string]$ConditionalAccessState='ReportOnly'
     )
@@ -97,8 +98,8 @@ function Connect-CISServices {
         $mgScopes = @(
             'Policy.ReadWrite.ConditionalAccess','Policy.Read.All','Application.Read.All',
             'Policy.ReadWrite.Authorization','Policy.ReadWrite.AuthenticationMethod',
-            'Directory.ReadWrite.All','User.Read.All','Domain.ReadWrite.All','RoleManagement.Read.Directory',
-            'Organization.Read.All',
+            'Directory.ReadWrite.All','User.ReadWrite.All','Domain.ReadWrite.All',
+            'RoleManagement.ReadWrite.Directory','Organization.Read.All',
             'DeviceManagementConfiguration.ReadWrite.All','DeviceManagementServiceConfig.ReadWrite.All',
             'DeviceManagementManagedDevices.Read.All'
         )
@@ -226,11 +227,19 @@ function Connect-CISServices {
         Connect-MicrosoftTeams -ErrorAction Stop | Out-Null
         $script:Ctx.Connected.Teams = $true
     }
+    if (-not $SkipPurview) {
+        # ExchangeOnlineManagement dostarcza Connect-IPPSSession (Security & Compliance / Purview)
+        if (-not (Get-Module 'ExchangeOnlineManagement')) { Confirm-CISModule 'ExchangeOnlineManagement' }
+        Write-CISLog 'Lacze z Microsoft Purview (Security & Compliance Center)...' INFO
+        Connect-IPPSSession -ShowBanner:$false -ErrorAction Stop
+        $script:Ctx.Connected.Purview = $true
+    }
     return $script:Ctx
 }
 function Disconnect-CISServices {
     try { Disconnect-MgGraph -ErrorAction SilentlyContinue | Out-Null } catch { }
     try { Disconnect-ExchangeOnline -Confirm:$false -ErrorAction SilentlyContinue } catch { }
+    try { Disconnect-IPPSSession -Confirm:$false -ErrorAction SilentlyContinue } catch { }
     try { Disconnect-SPOService -ErrorAction SilentlyContinue } catch { }
     try { Disconnect-MicrosoftTeams -ErrorAction SilentlyContinue | Out-Null } catch { }
 }
@@ -239,6 +248,69 @@ function Disconnect-CISServices {
 function Get-CISUsers {
     Get-MgUser -All -Property Id,DisplayName,UserPrincipalName,AccountEnabled -ErrorAction SilentlyContinue |
         Select-Object DisplayName, UserPrincipalName, AccountEnabled, Id | Sort-Object DisplayName
+}
+function Get-CISGlobalAdmins {
+    $gaTemplateId = '62e90394-69f5-4237-9190-012177145e10'   # Global Administrator role template
+    try {
+        $role = Get-MgDirectoryRole -All -ErrorAction Stop | Where-Object { $_.RoleTemplateId -eq $gaTemplateId }
+        if (-not $role) {
+            # Aktywuj role jesli jeszcze nie aktywowana w tenancie
+            Enable-MgDirectoryRole -RoleTemplateId $gaTemplateId -ErrorAction Stop | Out-Null
+            $role = Get-MgDirectoryRole -All | Where-Object { $_.RoleTemplateId -eq $gaTemplateId }
+        }
+        if ($role) {
+            return Get-MgDirectoryRoleMember -DirectoryRoleId $role.Id -All -ErrorAction Stop |
+                ForEach-Object { Get-MgUser -UserId $_.Id -Property Id,DisplayName,UserPrincipalName,AccountEnabled -ErrorAction SilentlyContinue } |
+                Where-Object { $_ } |
+                Select-Object DisplayName, UserPrincipalName, AccountEnabled, Id |
+                Sort-Object DisplayName
+        }
+    } catch {
+        Write-CISLog ("Nie mozna pobrac Global Adminow ({0}) - zwracam wszystkich uzytkownikow." -f $_.Exception.Message) WARN
+    }
+    Get-CISUsers
+}
+function New-CISBreakGlassAccount {
+    param(
+        [Parameter(Mandatory)][string]$UserPrincipalName,
+        [string]$DisplayName = 'Break Glass Account'
+    )
+    Add-Type -AssemblyName System.Web -ErrorAction SilentlyContinue
+    $pwd = try { [System.Web.Security.Membership]::GeneratePassword(24, 6) }
+           catch {
+               $c = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%^&*()'
+               $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+               $b = New-Object byte[] 32; $rng.GetBytes($b)
+               -join ($b | ForEach-Object { $c[$_ % $c.Length] })
+           }
+    $nick = ($UserPrincipalName -split '@')[0] -replace '[^a-zA-Z0-9]',''
+    $params = @{
+        DisplayName           = $DisplayName
+        UserPrincipalName     = $UserPrincipalName
+        MailNickname          = $nick
+        AccountEnabled        = $true
+        PasswordProfile       = @{ Password=$pwd; ForceChangePasswordNextSignIn=$false }
+        PasswordPolicies      = 'DisablePasswordExpiration'
+        UsageLocation         = 'PL'
+    }
+    $user = New-MgUser @params -ErrorAction Stop
+    Write-CISLog ("Utworzono konto BGA: {0}" -f $UserPrincipalName) OK
+    # Przypisz role Global Administrator
+    $gaTemplateId = '62e90394-69f5-4237-9190-012177145e10'
+    try {
+        $role = Get-MgDirectoryRole -All | Where-Object { $_.RoleTemplateId -eq $gaTemplateId }
+        if (-not $role) {
+            Enable-MgDirectoryRole -RoleTemplateId $gaTemplateId -ErrorAction Stop | Out-Null
+            $role = Get-MgDirectoryRole -All | Where-Object { $_.RoleTemplateId -eq $gaTemplateId }
+        }
+        New-MgDirectoryRoleMember -DirectoryRoleId $role.Id `
+            -BodyParameter @{ '@odata.id' = "https://graph.microsoft.com/v1.0/directoryObjects/$($user.Id)" } `
+            -ErrorAction Stop | Out-Null
+        Write-CISLog ("Przypisano role Global Administrator do {0}" -f $UserPrincipalName) OK
+    } catch {
+        Write-CISLog ("Nie udalo sie przypisac roli GA ({0}) - przypisz recznie w Entra." -f $_.Exception.Message) WARN
+    }
+    return [pscustomobject]@{ User=$user; Password=$pwd }
 }
 function Set-CISBreakGlass {
     param([Parameter(Mandatory)]$User)  # obiekt z .Id i .UserPrincipalName, albo UPN (string)
@@ -359,6 +431,10 @@ $script:ControlDocs = @{
     'SPO-LEGACYAUTH'             = 'Wyłączono starsze protokoły uwierzytelniania w SharePoint (LegacyAuthProtocolsEnabled = false).'
     'TEAMS-CONSUMER'             = 'Zablokowano komunikację z kontami konsumenckimi Teams (AllowTeamsConsumer = false).'
     'TEAMS-MEETING'              = 'Wzmocniono politykę spotkań: anonimowi nie dołączają/nie startują spotkań, automatyczne wpuszczanie tylko dla użytkowników firmy (bez gości).'
+    'PUR-DLP-EXCHANGE'           = 'Polityka DLP obejmująca Exchange Online - wykrywanie danych wrażliwych w wiadomościach e-mail i blokada ich wysyłki poza organizację.'
+    'PUR-DLP-CLOUD'              = 'Polityka DLP obejmująca SharePoint Online, OneDrive i Teams - wykrywanie i ochrona danych wrażliwych w chmurze.'
+    'PUR-SENSITIVITY-LABELS'     = 'Etykiety wrażliwości (Sensitivity Labels) są opublikowane i dostępne dla użytkowników - umożliwiają klasyfikację i ochronę dokumentów oraz e-maili.'
+    'PUR-RETENTION'              = 'Polityka retencji obejmuje Exchange, SharePoint i Teams - zapewnia przechowywanie danych przez wymagany okres zgodnie z przepisami.'
 }
 
 # ---------- RAPORT HTML ----------
@@ -789,6 +865,86 @@ $ControlRegistry = @(
             New-MgDeviceManagementDeviceCompliancePolicy -BodyParameter $body | Out-Null
         }
     }
+
+
+    #----- MICROSOFT PURVIEW (Security & Compliance) -----
+    [pscustomobject]@{
+        Id='PUR-DLP-EXCHANGE'; Service='Purview'; Area='Purview'; Cis='3.3.x'; Level=1
+        Name='Polityka DLP dla Exchange (ochrona danych wrazliwych w poczcie)'
+        Test={
+            $p = Get-DlpCompliancePolicy -ErrorAction SilentlyContinue |
+                 Where-Object { $_.Workload -match 'Exchange' -and $_.Mode -eq 'Enable' }
+            if ($p) { New-TestResult $true ("Aktywne polityki DLP dla Exchange: " + @($p).Count) }
+            else    { New-TestResult $false 'Brak aktywnej polityki DLP obejmujacej Exchange' }
+        }
+        Apply={
+            $name = 'CIS - DLP Exchange Baseline'
+            if (-not (Get-DlpCompliancePolicy -Identity $name -ErrorAction SilentlyContinue)) {
+                New-DlpCompliancePolicy -Name $name -Mode Enable -ExchangeLocation All -ErrorAction Stop | Out-Null
+                New-DlpComplianceRule -Name "$name - Credit Cards" -Policy $name `
+                    -ContentContainsSensitiveInformation @(@{Name='Credit Card Number';minCount='1'}) `
+                    -BlockAccess $true -NotifyUser 'LastModifiedBy' -ErrorAction SilentlyContinue | Out-Null
+                New-DlpComplianceRule -Name "$name - PII" -Policy $name `
+                    -ContentContainsSensitiveInformation @(@{Name='U.S. Individual Taxpayer Identification Number (ITIN)';minCount='1'}) `
+                    -BlockAccess $false -NotifyUser 'LastModifiedBy' -GenerateAlert $true -ErrorAction SilentlyContinue | Out-Null
+            } else { Set-DlpCompliancePolicy -Identity $name -Mode Enable | Out-Null }
+        }
+    },
+    [pscustomobject]@{
+        Id='PUR-DLP-CLOUD'; Service='Purview'; Area='Purview'; Cis='3.3.x'; Level=1
+        Name='Polityka DLP dla SharePoint / OneDrive / Teams'
+        Test={
+            $p = Get-DlpCompliancePolicy -ErrorAction SilentlyContinue |
+                 Where-Object { ($_.Workload -match 'SharePoint|OneDrive|Teams') -and $_.Mode -eq 'Enable' }
+            if ($p) { New-TestResult $true ("Aktywne polityki DLP dla chmury: " + @($p).Count) }
+            else    { New-TestResult $false 'Brak aktywnej polityki DLP dla SharePoint/OneDrive/Teams' }
+        }
+        Apply={
+            $name = 'CIS - DLP Cloud Baseline'
+            if (-not (Get-DlpCompliancePolicy -Identity $name -ErrorAction SilentlyContinue)) {
+                New-DlpCompliancePolicy -Name $name -Mode Enable `
+                    -SharePointLocation All -OneDriveLocation All -TeamsLocation All `
+                    -ErrorAction Stop | Out-Null
+                New-DlpComplianceRule -Name "$name - Sensitive Data" -Policy $name `
+                    -ContentContainsSensitiveInformation @(@{Name='Credit Card Number';minCount='1'}) `
+                    -BlockAccess $true -NotifyUser 'LastModifiedBy' -ErrorAction SilentlyContinue | Out-Null
+            } else { Set-DlpCompliancePolicy -Identity $name -Mode Enable | Out-Null }
+        }
+    },
+    [pscustomobject]@{
+        Id='PUR-SENSITIVITY-LABELS'; Service='Purview'; Area='Purview'; Cis='3.2.x'; Level=1
+        Name='Etykiety wrazliwosci (Sensitivity Labels) opublikowane'
+        Test={
+            $labels = Get-Label -ErrorAction SilentlyContinue
+            if ($labels -and @($labels).Count -gt 0) { New-TestResult $true ("Etykiety: " + @($labels).Count) }
+            else { New-TestResult $false 'Brak opublikowanych etykiet wrazliwosci' }
+        }
+        Apply={
+            Write-CISLog 'Etykiety wrazliwosci konfiguruje sie w Purview > Information Protection > Sensitivity labels.' WARN
+            Write-CISLog 'Minimalny zestaw: Public, Internal, Confidential, Highly Confidential.' INFO
+        }
+    },
+    [pscustomobject]@{
+        Id='PUR-RETENTION'; Service='Purview'; Area='Purview'; Cis='3.4.x'; Level=1
+        Name='Polityka retencji obejmujaca Exchange / SharePoint / Teams'
+        Test={
+            $p = Get-RetentionCompliancePolicy -ErrorAction SilentlyContinue | Where-Object { -not $_.Disabled }
+            if ($p -and @($p).Count -gt 0) { New-TestResult $true ("Aktywne polityki retencji: " + @($p).Count) }
+            else { New-TestResult $false 'Brak aktywnej polityki retencji' }
+        }
+        Apply={
+            $name = 'CIS - Retention Baseline (1 rok)'
+            if (-not (Get-RetentionCompliancePolicy -Identity $name -ErrorAction SilentlyContinue)) {
+                New-RetentionCompliancePolicy -Name $name `
+                    -ExchangeLocation All -SharePointLocation All -OneDriveLocation All `
+                    -TeamsChannelLocation All -TeamsChatsLocation All -Enabled $true `
+                    -ErrorAction Stop | Out-Null
+                New-RetentionComplianceRule -Name "$name - Zasada" -Policy $name `
+                    -RetentionDuration 365 -RetentionComplianceAction Keep `
+                    -ErrorAction SilentlyContinue | Out-Null
+            }
+        }
+    }
 )
     return $ControlRegistry
 }
@@ -800,6 +956,7 @@ function Get-CISControlDocs { $script:ControlDocs }
 Export-ModuleMember -Function `
     Set-CISLogCallback, Set-CISDeviceCodeCallback, Write-CISLog, Confirm-CISModule, New-TestResult, ConvertTo-HtmlText, `
     Reset-CISContext, Get-CISContext, Connect-CISServices, Disconnect-CISServices, `
-    Get-CISUsers, Set-CISBreakGlass, Invoke-CISScan, Invoke-CISApply, Remove-CISLegacyPolicies, `
+    Get-CISUsers, Get-CISGlobalAdmins, New-CISBreakGlassAccount, Set-CISBreakGlass, `
+    Invoke-CISScan, Invoke-CISApply, Remove-CISLegacyPolicies, `
     Get-CISProfileSelection, Import-CISProfile, Save-CISProfile, `
     New-DeploymentReport, Get-CISControlRegistry, Get-CISControlDocs
