@@ -546,7 +546,6 @@ $ctrl.btnConnect.Add_Click({
 })
 
 $ctrl.btnScan.Add_Click({
-    # Przygotowanie
     $ctrl.btnScan.IsEnabled  = $false
     $ctrl.btnApply.IsEnabled = $false
     $ctrl.prgScan.Visibility = 'Visible'
@@ -556,72 +555,58 @@ $ctrl.btnScan.Add_Click({
     $ctrl.lblStatus.Foreground = '#444'
     Set-Status 'Skanowanie: pobieranie rejestru...'
 
-    $registry = @(Get-CISControlRegistry | Where-Object { (Get-CISContext).Connected[$_.Service] })
-    $total    = $registry.Count
-    if ($total -eq 0) {
+    $script:_ScanRegistry = @(Get-CISControlRegistry | Where-Object { (Get-CISContext).Connected[$_.Service] })
+    $script:_ScanTotal    = $script:_ScanRegistry.Count
+    if ($script:_ScanTotal -eq 0) {
         Set-Status 'Brak kontrolek do skanowania. Sprawdz polaczenie.'
         $ctrl.btnScan.IsEnabled = $true; $ctrl.prgScan.Visibility = 'Collapsed'; return
     }
+    $script:_ScanIdx     = 0
+    $script:_ScanResults = [System.Collections.Generic.List[object]]::new()
 
-    $scanResults = [System.Collections.Generic.List[object]]::new()
-    $scanIdx     = [ref]0
-
-    $scanTimer = [System.Windows.Threading.DispatcherTimer]::new()
-    $scanTimer.Interval = [TimeSpan]::FromMilliseconds(5)
-    $scanTimer.Add_Tick({
-        $i = $scanIdx.Value
-        if ($i -ge $total) {
-            $scanTimer.Stop()
-            $script:LastScan = $scanResults.ToArray()
-            $ctrl.btnApply.IsEnabled  = $true
+    if ($script:_ScanTimer) { try { $script:_ScanTimer.Stop() } catch {} }
+    $script:_ScanTimer = [System.Windows.Threading.DispatcherTimer]::new()
+    $script:_ScanTimer.Interval = [TimeSpan]::FromMilliseconds(20)
+    $script:_ScanTimer.Add_Tick({
+        $i = $script:_ScanIdx
+        if ($i -ge $script:_ScanTotal) {
+            $script:_ScanTimer.Stop()
+            $script:LastScan = $script:_ScanResults.ToArray()
+            $ctrl.btnApply.IsEnabled      = $true
             $ctrl.btnReport.IsEnabled     = $true
             $ctrl.btnExportCsv.IsEnabled  = $true
             $ctrl.btnExportWord.IsEnabled = $true
             $ctrl.btnEmail.IsEnabled      = $true
-            $ctrl.btnScan.IsEnabled   = $true
-            $ctrl.prgScan.Visibility  = 'Collapsed'
-            $ok   = @($scanResults | Where-Object Status -eq 'Zgodne').Count
-            $nok  = @($scanResults | Where-Object Status -eq 'NIEZGODNE').Count
-            $warn = @($scanResults | Where-Object Status -eq 'WARN').Count
-            $pct  = if ($total -gt 0) { [int]([math]::Round($ok / $total * 100)) } else { 0 }
+            $ctrl.btnScan.IsEnabled       = $true
+            $ctrl.prgScan.Visibility      = 'Collapsed'
+            $ok   = @($script:_ScanResults | Where-Object Status -eq 'Zgodne').Count
+            $nok  = @($script:_ScanResults | Where-Object Status -eq 'NIEZGODNE').Count
+            $pct  = if ($script:_ScanTotal -gt 0) { [int]([math]::Round($ok / $script:_ScanTotal * 100)) } else { 0 }
             $scoreColor = if ($pct -ge 80) { '#27ae60' } elseif ($pct -ge 50) { '#e67e22' } else { '#c0392b' }
             $ctrl.lblStatus.Foreground = $scoreColor
-            Set-Status ("Zgodnosc CIS: {0}% ({1}/{2} OK) | Niezgodne: {3} | Ostrzezenia: {4}" -f $pct,$ok,$total,$nok,$warn)
+            Set-Status ("Zgodnosc CIS: {0}% ({1}/{2} OK) | Niezgodne: {3}" -f $pct,$ok,$script:_ScanTotal,$nok)
             return
         }
-
-        $c = $registry[$i]
+        $c = $script:_ScanRegistry[$i]
         $status = 'Unknown'; $current = '-'
         try {
-            $r = $c.Test.Invoke()
+            $r = & $c.Test
             $status  = if ($r.Compliant) { 'Zgodne' } else { 'NIEZGODNE' }
             $current = $r.Current
-        } catch { $status = 'Blad'; $current = $_.Exception.Message.Substring(0, [Math]::Min(120, $_.Exception.Message.Length)) }
-
+        } catch { $status = 'Blad'; $current = $_.Exception.Message }
         $row = [pscustomobject]@{
-            Selected  = ($status -eq 'NIEZGODNE')
-            Id        = $c.Id
-            Obszar    = $c.Area
-            Kontrolka = $c.Name
-            Status    = $status
-            Poziom    = ("L{0}" -f $c.Level)
-            Level     = $c.Level
-            CIS       = $c.Cis
-            Aktualnie = $current
+            Selected=$($status -eq 'NIEZGODNE'); Id=$c.Id; Obszar=$c.Area; Kontrolka=$c.Name
+            Status=$status; Poziom=("L{0}"-f $c.Level); Level=$c.Level; CIS=$c.Cis; Aktualnie=$current
         }
-        $scanResults.Add($row)
+        $script:_ScanResults.Add($row)
         $script:AllRows.Add($row)
         if (Test-RowVisible $row) { $script:View.Add($row) }
-
-        $pct2 = [int](($i + 1) / $total * 100)
-        $ctrl.prgScan.Value = $pct2
-        Set-Status ("[{0}/{1}] {2}" -f ($i + 1), $total, $c.Name)
-        $logLvl = if ($status -eq 'Zgodne') { 'OK' } elseif ($status -eq 'NIEZGODNE') { 'WARN' } else { 'ERROR' }
-        Write-CISLog ("{0,-12} L{1} {2}" -f $status, $c.Level, $c.Name) $logLvl
-
-        $scanIdx.Value = $i + 1
-    }.GetNewClosure())
-    $scanTimer.Start()
+        $ctrl.prgScan.Value = [int](($i+1)/$script:_ScanTotal*100)
+        Set-Status ("[{0}/{1}] {2}" -f ($i+1),$script:_ScanTotal,$c.Name)
+        Write-CISLog ("{0,-12} L{1} {2}" -f $status,$c.Level,$c.Name) $(if($status-eq'Zgodne'){'OK'}elseif($status-eq'NIEZGODNE'){'WARN'}else{'ERROR'})
+        $script:_ScanIdx++
+    })
+    $script:_ScanTimer.Start()
 })
 
 $ctrl.btnApply.Add_Click({
@@ -629,94 +614,95 @@ $ctrl.btnApply.Add_Click({
     if ($ids.Count -eq 0) {
         [System.Windows.MessageBox]::Show('Nie zaznaczono zadnej kontrolki.','Info','OK','Information') | Out-Null; return
     }
-    $whatif = [bool]$ctrl.chkWhatIf.IsChecked
-    $mode   = if ($whatif) { 'SYMULACJA (WhatIf)' } else { 'REALNE WDROZENIE' }
-    $r      = [System.Windows.MessageBox]::Show(("Tryb: {0}`nKontrolek: {1}`n`nKontynuowac?" -f $mode,$ids.Count),'Potwierdzenie','YesNo','Question')
+    $script:_ApplyWhatIf = [bool]$ctrl.chkWhatIf.IsChecked
+    $script:_ApplyMode   = if ($script:_ApplyWhatIf) { 'SYMULACJA (WhatIf)' } else { 'REALNE WDROZENIE' }
+    $r = [System.Windows.MessageBox]::Show(("Tryb: {0}`nKontrolek: {1}`n`nKontynuowac?" -f $script:_ApplyMode,$ids.Count),'Potwierdzenie','YesNo','Question')
     if ($r -ne 'Yes') { return }
 
     $ctrl.btnApply.IsEnabled = $false
     $ctrl.btnScan.IsEnabled  = $false
     $ctrl.prgScan.Visibility = 'Visible'
     $ctrl.prgScan.Value      = 0
-    Set-Status "$mode..."
+    Set-Status "$($script:_ApplyMode)..."
 
-    $registry     = Get-CISControlRegistry
-    $toApply      = @($ids | ForEach-Object { $id = $_; $registry | Where-Object Id -eq $id })
-    $applyTotal   = $toApply.Count
-    $applyIdx     = [ref]0
-    $applyResults = [System.Collections.Generic.List[object]]::new()
+    $reg = Get-CISControlRegistry
+    $script:_ApplyList    = @($ids | ForEach-Object { $id=$_; $reg | Where-Object Id -eq $id })
+    $script:_ApplyTotal   = $script:_ApplyList.Count
+    $script:_ApplyIdx     = 0
+    $script:_ApplyResults = [System.Collections.Generic.List[object]]::new()
 
-    $applyTimer = [System.Windows.Threading.DispatcherTimer]::new()
-    $applyTimer.Interval = [TimeSpan]::FromMilliseconds(5)
-    $applyTimer.Add_Tick({
-        $i = $applyIdx.Value
-        if ($i -ge $applyTotal) {
-            $applyTimer.Stop()
-            $script:LastApplied = $applyResults.ToArray()
+    if ($script:_ApplyTimer) { try { $script:_ApplyTimer.Stop() } catch {} }
+    $script:_ApplyTimer = [System.Windows.Threading.DispatcherTimer]::new()
+    $script:_ApplyTimer.Interval = [TimeSpan]::FromMilliseconds(20)
+    $script:_ApplyTimer.Add_Tick({
+        $i = $script:_ApplyIdx
+        if ($i -ge $script:_ApplyTotal) {
+            $script:_ApplyTimer.Stop()
+            $script:LastApplied = $script:_ApplyResults.ToArray()
+            $ok3 = @($script:_ApplyResults | Where-Object Status -eq 'APPLIED').Count
+            $er3 = @($script:_ApplyResults | Where-Object Status -eq 'ERROR').Count
+            Write-CISLog ("Wdrozenie zakonczone: {0} OK, {1} bledow." -f $ok3,$er3) OK
 
-            if (-not $whatif) {
-                # Reskan asynchroniczny po wdrozeniu
-                $ctrl.btnScan.IsEnabled = $false
+            if (-not $script:_ApplyWhatIf) {
+                # Reskan po wdrozeniu — reuse scan mechanism
                 $script:AllRows.Clear(); $script:View.Clear()
-                $registry2 = @(Get-CISControlRegistry | Where-Object { (Get-CISContext).Connected[$_.Service] })
-                $total2    = $registry2.Count
-                $scanR2    = [System.Collections.Generic.List[object]]::new()
-                $idx2      = [ref]0
-                $rescanT   = [System.Windows.Threading.DispatcherTimer]::new()
-                $rescanT.Interval = [TimeSpan]::FromMilliseconds(5)
-                $rescanT.Add_Tick({
-                    $j = $idx2.Value
-                    if ($j -ge $total2) {
-                        $rescanT.Stop()
-                        $script:LastScan = $scanR2.ToArray()
+                $script:_ScanRegistry = @(Get-CISControlRegistry | Where-Object { (Get-CISContext).Connected[$_.Service] })
+                $script:_ScanTotal    = $script:_ScanRegistry.Count
+                $script:_ScanIdx      = 0
+                $script:_ScanResults  = [System.Collections.Generic.List[object]]::new()
+                if ($script:_ScanTimer) { try { $script:_ScanTimer.Stop() } catch {} }
+                $script:_ScanTimer = [System.Windows.Threading.DispatcherTimer]::new()
+                $script:_ScanTimer.Interval = [TimeSpan]::FromMilliseconds(20)
+                $script:_ScanTimer.Add_Tick({
+                    $j = $script:_ScanIdx
+                    if ($j -ge $script:_ScanTotal) {
+                        $script:_ScanTimer.Stop()
+                        $script:LastScan = $script:_ScanResults.ToArray()
                         $ctrl.btnScan.IsEnabled  = $true
                         $ctrl.btnApply.IsEnabled = $true
                         $ctrl.prgScan.Visibility = 'Collapsed'
-                        $ok2  = @($scanR2 | Where-Object Status -eq 'Zgodne').Count
-                        $nok2 = @($scanR2 | Where-Object Status -eq 'NIEZGODNE').Count
-                        Set-Status ("Po wdrozeniu: {0}/{1} OK, {2} niezgodne." -f $ok2,$total2,$nok2)
+                        $ok2  = @($script:_ScanResults | Where-Object Status -eq 'Zgodne').Count
+                        $nok2 = @($script:_ScanResults | Where-Object Status -eq 'NIEZGODNE').Count
+                        Set-Status ("Po wdrozeniu: {0}/{1} OK, {2} niezgodne." -f $ok2,$script:_ScanTotal,$nok2)
                         return
                     }
-                    $c2 = $registry2[$j]
-                    $st2 = 'Unknown'; $cur2 = '-'
-                    try { $res2=$c2.Test.Invoke(); $st2=if($res2.Compliant){'Zgodne'}else{'NIEZGODNE'}; $cur2=$res2.Current } catch { $st2='Blad'; $cur2=$_.Exception.Message }
-                    $row2 = [pscustomobject]@{ Selected=($st2-eq'NIEZGODNE'); Id=$c2.Id; Obszar=$c2.Area; Kontrolka=$c2.Name; Status=$st2; Poziom=("L{0}"-f $c2.Level); Level=$c2.Level; CIS=$c2.Cis; Aktualnie=$cur2 }
-                    $scanR2.Add($row2); $script:AllRows.Add($row2); if (Test-RowVisible $row2) { $script:View.Add($row2) }
-                    $ctrl.prgScan.Value = [int](($j+1)/$total2*100)
-                    Set-Status ("Reskan: [{0}/{1}] {2}" -f ($j+1),$total2,$c2.Name)
-                    $idx2.Value = $j + 1
-                }.GetNewClosure())
-                $rescanT.Start()
+                    $c2 = $script:_ScanRegistry[$j]
+                    $st2='Unknown'; $cur2='-'
+                    try { $res2=& $c2.Test; $st2=if($res2.Compliant){'Zgodne'}else{'NIEZGODNE'}; $cur2=$res2.Current } catch { $st2='Blad'; $cur2=$_.Exception.Message }
+                    $row2=[pscustomobject]@{ Selected=($st2-eq'NIEZGODNE'); Id=$c2.Id; Obszar=$c2.Area; Kontrolka=$c2.Name; Status=$st2; Poziom=("L{0}"-f$c2.Level); Level=$c2.Level; CIS=$c2.Cis; Aktualnie=$cur2 }
+                    $script:_ScanResults.Add($row2); $script:AllRows.Add($row2); if(Test-RowVisible $row2){$script:View.Add($row2)}
+                    $ctrl.prgScan.Value=[int](($j+1)/$script:_ScanTotal*100)
+                    Set-Status("Reskan: [{0}/{1}] {2}" -f ($j+1),$script:_ScanTotal,$c2.Name)
+                    $script:_ScanIdx++
+                })
+                $script:_ScanTimer.Start()
             } else {
                 $ctrl.btnApply.IsEnabled = $true
                 $ctrl.btnScan.IsEnabled  = $true
                 $ctrl.prgScan.Visibility = 'Collapsed'
+                Set-Status ("WhatIf: {0} sprawdzono, brak zmian." -f $script:_ApplyTotal)
             }
-            $ok3 = @($applyResults | Where-Object Status -eq 'APPLIED').Count
-            $er3 = @($applyResults | Where-Object Status -eq 'ERROR').Count
-            Write-CISLog ("Wdrozenie zakonczone: {0} OK, {1} bledow." -f $ok3,$er3) OK
             return
         }
-
-        $c = $toApply[$i]
-        if ($whatif) {
+        $c = $script:_ApplyList[$i]
+        if ($script:_ApplyWhatIf) {
             Write-CISLog ("WHATIF: {0}" -f $c.Name) SKIP
-            $applyResults.Add([pscustomobject]@{ Id=$c.Id; Name=$c.Name; Status='WHATIF'; Detail='' })
+            $script:_ApplyResults.Add([pscustomobject]@{ Id=$c.Id; Name=$c.Name; Status='WHATIF'; Detail='' })
         } else {
             try {
                 & $c.Apply
                 Write-CISLog ("WDROZONO: {0}" -f $c.Name) OK
-                $applyResults.Add([pscustomobject]@{ Id=$c.Id; Name=$c.Name; Status='APPLIED'; Detail='' })
+                $script:_ApplyResults.Add([pscustomobject]@{ Id=$c.Id; Name=$c.Name; Status='APPLIED'; Detail='' })
             } catch {
                 Write-CISLog ("BLAD [{0}]: {1}" -f $c.Id,$_.Exception.Message) ERROR
-                $applyResults.Add([pscustomobject]@{ Id=$c.Id; Name=$c.Name; Status='ERROR'; Detail=$_.Exception.Message })
+                $script:_ApplyResults.Add([pscustomobject]@{ Id=$c.Id; Name=$c.Name; Status='ERROR'; Detail=$_.Exception.Message })
             }
         }
-        $ctrl.prgScan.Value = [int](($i+1)/$applyTotal*100)
-        Set-Status ("{0}: [{1}/{2}] {3}" -f $mode, ($i+1), $applyTotal, $c.Name)
-        $applyIdx.Value = $i + 1
-    }.GetNewClosure())
-    $applyTimer.Start()
+        $ctrl.prgScan.Value = [int](($i+1)/$script:_ApplyTotal*100)
+        Set-Status ("{0}: [{1}/{2}] {3}" -f $script:_ApplyMode,($i+1),$script:_ApplyTotal,$c.Name)
+        $script:_ApplyIdx++
+    })
+    $script:_ApplyTimer.Start()
 })
 
 $ctrl.btnReport.Add_Click({
