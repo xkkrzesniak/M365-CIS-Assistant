@@ -566,11 +566,12 @@ function Show-StartTenantWizard {
         Scan   = $LastScan
         Sel    = [System.Collections.Generic.Dictionary[string,bool]]::new()
         Steps  = @(
-            @{ T='Krok 1/5: Tożsamość i Entra ID';         A=@('Entra ID','Copilot');           D='Conditional Access, MFA, uprawnienia użytkowników, konsent aplikacji, konta administratorów.' }
-            @{ T='Krok 2/5: Exchange Online & Defender';   A=@('Exchange','Defender','Email-Auth'); D='Antyspam, anti-phishing, Safe Attachments, DKIM, protokoły poczty.' }
-            @{ T='Krok 3/5: SharePoint Online & OneDrive'; A=@('SharePoint');                   D='Zewnętrzne udostępnianie, typy linków, goście, urządzenia niezarządzane.' }
-            @{ T='Krok 4/5: Microsoft Teams';              A=@('Teams');                        D='Dostęp zewnętrzny, goście, spotkania, lobby, nagrywanie, bezpieczeństwo czatu.' }
-            @{ T='Krok 5/5: Podsumowanie i wdrożenie';    A=@();                               D='Przejrzyj wybrane poprawki i kliknij Wdróż, aby zastosować je w tenancie.' }
+            @{ T='Krok 1/6: Tożsamość i Entra ID';          A=@('Entra ID','Copilot');              D='Conditional Access, MFA, uprawnienia użytkowników, konsent aplikacji, konta administratorów.' }
+            @{ T='Krok 2/6: Exchange Online & Defender';    A=@('Exchange','Defender','Email-Auth'); D='Antyspam, anti-phishing, Safe Attachments, DKIM, protokoły poczty.' }
+            @{ T='Krok 3/6: SharePoint Online & OneDrive';  A=@('SharePoint');                      D='Zewnętrzne udostępnianie, typy linków, goście, urządzenia niezarządzane.' }
+            @{ T='Krok 4/6: Microsoft Teams';               A=@('Teams');                           D='Dostęp zewnętrzny, goście, spotkania, lobby, nagrywanie, bezpieczeństwo czatu.' }
+            @{ T='Krok 5/6: Intune, Purview & Power Platform'; A=@('Intune','Purview','Power Platform'); D='Zgodność urządzeń (Intune), DLP i etykiety wrażliwości (Purview), zarządzanie środowiskami (Power Platform).' }
+            @{ T='Krok 6/6: Podsumowanie i wdrożenie';     A=@();                                  D='Przejrzyj wybrane poprawki i kliknij Wdróż, aby zastosować je w tenancie.' }
         )
     }
 
@@ -739,12 +740,12 @@ function Show-StartTenantWizard {
         $wc.stkContent.Children.Clear()
 
         $wc.btnWBack.IsEnabled = ($s -gt 0)
-        $wc.btnWNext.Visibility  = if ($s -lt 4) { 'Visible' }   else { 'Collapsed' }
-        $wc.btnWApply.Visibility = if ($s -eq 4) { 'Visible' }   else { 'Collapsed' }
+        $wc.btnWNext.Visibility  = if ($s -lt 5) { 'Visible' }   else { 'Collapsed' }
+        $wc.btnWApply.Visibility = if ($s -eq 5) { 'Visible' }   else { 'Collapsed' }
 
         & $buildSteps
 
-        if ($s -lt 4) {
+        if ($s -lt 5) {
             # Strony 1-4: lista kontrolek z obszaru
             $areas = $step.A
             $rows  = @($state.Scan | Where-Object { $areas -contains $_.Obszar })
@@ -833,7 +834,7 @@ function Show-StartTenantWizard {
 
     # Nawigacja
     $wc.btnWNext.Add_Click({
-        if ($state.Step -lt 4) { $state.Step++; & $renderPage }
+        if ($state.Step -lt 5) { $state.Step++; & $renderPage }
     }.GetNewClosure())
 
     $wc.btnWBack.Add_Click({
