@@ -22,9 +22,12 @@ function Write-CISLog {
     Write-Host ("[{0}] [{1}] {2}" -f (Get-Date -Format 'HH:mm:ss'), $Level, $Message) -ForegroundColor $color
 }
 function Confirm-CISModule {
-    param([string]$Name, [switch]$OnlyInstall)
-    if (-not (Get-Module -ListAvailable -Name $Name)) {
-        Write-CISLog "Instaluje modul $Name..." WARN
+    param([string]$Name, [switch]$OnlyInstall, [version]$MinVersion)
+    $installed = Get-Module -ListAvailable -Name $Name | Sort-Object Version -Descending | Select-Object -First 1
+    $needsInstall = -not $installed -or ($MinVersion -and [version]$installed.Version -lt $MinVersion)
+    if ($needsInstall) {
+        $label = if ($MinVersion) { "$Name (min v$MinVersion)" } else { $Name }
+        Write-CISLog "Instaluje $label..." WARN
         Install-Module -Name $Name -Scope CurrentUser -Force -AllowClobber -ErrorAction Stop
         Write-CISLog "Zainstalowano $Name." OK
     }
@@ -224,7 +227,7 @@ Connect-MgGraph -NoWelcome -UseDeviceAuthentication -Scopes `$s -ErrorAction Sto
         }
     }
     if (-not $SkipExchange) {
-        Confirm-CISModule 'ExchangeOnlineManagement'
+        Confirm-CISModule 'ExchangeOnlineManagement' -MinVersion '3.2.0'
         Write-CISLog 'Lacze z Exchange Online...'
         if ($script:WamBroken) {
             Invoke-CISDeviceConnect -ServiceName 'Exchange Online' -ConnectInvoke @'
@@ -291,7 +294,11 @@ Connect-MicrosoftTeams -UseDeviceAuthentication -ErrorAction Stop | Out-Null
     }
     if (-not $SkipPurview) {
         # ExchangeOnlineManagement dostarcza Connect-IPPSSession (Security & Compliance / Purview)
-        if (-not (Get-Module 'ExchangeOnlineManagement')) { Confirm-CISModule 'ExchangeOnlineManagement' }
+        $exoLoaded = Get-Module 'ExchangeOnlineManagement' -ErrorAction SilentlyContinue
+        $exoLoadedVer = if ($exoLoaded) { [version]$exoLoaded.Version } else { $null }
+        if (-not $exoLoaded -or ($exoLoadedVer -and $exoLoadedVer -lt [version]'3.2.0')) {
+            Confirm-CISModule 'ExchangeOnlineManagement' -MinVersion '3.2.0'
+        }
         Write-CISLog 'Lacze z Microsoft Purview (Security & Compliance Center)...' INFO
         if ($script:WamBroken) {
             Invoke-CISDeviceConnect -ServiceName 'Purview' -ConnectInvoke @'
