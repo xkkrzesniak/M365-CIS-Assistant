@@ -555,7 +555,7 @@ $ctrl.btnApplyProfile.Add_Click({
     if (-not $name) { return }
     try {
         $p = Import-CISProfile -Path (Join-Path (Join-Path $script:AppRoot 'profiles') $name)
-        $ids = Get-CISProfileSelection -Profile $p -Scan $script:AllRows
+        $ids = Get-CISProfileSelection -CisProfile $p -Scan $script:AllRows
         foreach ($r in $script:AllRows) { $r.Selected = ($ids -contains $r.Id) }
         Update-View   # przerysuj checkboxy
         Set-Status ("Profil '{0}': zaznaczono {1} kontrolek." -f $p.name, @($ids).Count)

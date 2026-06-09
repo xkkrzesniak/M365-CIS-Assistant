@@ -107,7 +107,7 @@ $defaultIds = @($scan | Where-Object Selected).Id
 if ($Profile) {
     try {
         $p = Import-CISProfile -Path $Profile
-        $defaultIds = @(Get-CISProfileSelection -Profile $p -Scan $scan)
+        $defaultIds = @(Get-CISProfileSelection -CisProfile $p -Scan $scan)
         Write-CISLog ("Profil '{0}': {1} kontrolek." -f $p.name, $defaultIds.Count) INFO
     } catch { Write-CISLog ("Blad profilu: {0}" -f $_.Exception.Message) ERROR }
 }

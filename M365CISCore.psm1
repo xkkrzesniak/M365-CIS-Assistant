@@ -272,10 +272,11 @@ Connect-MgGraph -NoWelcome -UseDeviceAuthentication -Scopes `$s -ErrorAction Sto
             Install-Module ExchangeOnlineManagement -Scope CurrentUser -Force -AllowClobber -ErrorAction SilentlyContinue
             Import-Module ExchangeOnlineManagement -Force -ErrorAction SilentlyContinue
         }
-        # Pelna sciezka zaladowanego modulu - runspace uzyje DOKLADNIE tej wersji (omija niejednoznacznosc)
-        $script:ExoModFile = (Get-Module ExchangeOnlineManagement).Path
-        $exoLoad = if ($script:ExoModFile) { "Import-Module '$($script:ExoModFile)' -Force" } else { "Import-Module ExchangeOnlineManagement -Force" }
-        Write-CISLog "Lacze z Exchange Online (EXO v$((Get-Module ExchangeOnlineManagement).Version))..."
+        # Wybierz NAJWYZSZA zaladowana wersje - Get-Module moze zwracac array gdy zaladowano wiele wersji
+        $exoMod = Get-Module ExchangeOnlineManagement | Sort-Object Version -Descending | Select-Object -First 1
+        $script:ExoModFile = $exoMod.Path
+        $exoLoad = if ($script:ExoModFile) { "Import-Module '$($script:ExoModFile)' -Force -ErrorAction Stop" } else { "Import-Module ExchangeOnlineManagement -Force -ErrorAction Stop" }
+        Write-CISLog "Lacze z Exchange Online (EXO v$($exoMod.Version))..."
         if ($script:WamBroken) {
             Invoke-CISDeviceConnect -ServiceName 'Exchange Online' -ConnectInvoke "$exoLoad -ErrorAction SilentlyContinue`nConnect-ExchangeOnline -ShowBanner:`$false -Device -ErrorAction Stop"
         } else {
@@ -312,8 +313,9 @@ Connect-MgGraph -NoWelcome -UseDeviceAuthentication -Scopes `$s -ErrorAction Sto
     }
     if (-not $SkipTeams) {
         Confirm-CISModule 'MicrosoftTeams'
-        $teamsModFile = (Get-Module MicrosoftTeams).Path
-        $teamsLoad = if ($teamsModFile) { "Import-Module '$teamsModFile' -Force" } else { "Import-Module MicrosoftTeams -Force" }
+        $teamsMod = Get-Module MicrosoftTeams | Sort-Object Version -Descending | Select-Object -First 1
+        $teamsModFile = $teamsMod.Path
+        $teamsLoad = if ($teamsModFile) { "Import-Module '$teamsModFile' -Force -ErrorAction Stop" } else { "Import-Module MicrosoftTeams -Force -ErrorAction Stop" }
         Write-CISLog 'Lacze z Microsoft Teams...'
         if ($script:WamBroken) {
             Invoke-CISDeviceConnect -ServiceName 'Microsoft Teams' -ConnectInvoke "$teamsLoad -ErrorAction SilentlyContinue`nConnect-MicrosoftTeams -UseDeviceAuthentication -ErrorAction Stop | Out-Null"
@@ -395,7 +397,7 @@ function New-CISBreakGlassAccount {
         [string]$DisplayName = 'Break Glass Account'
     )
     Add-Type -AssemblyName System.Web -ErrorAction SilentlyContinue
-    $pwd = try { [System.Web.Security.Membership]::GeneratePassword(24, 6) }
+    $bgaPwd = try { [System.Web.Security.Membership]::GeneratePassword(24, 6) }
            catch {
                $c = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%^&*()'
                $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
@@ -408,7 +410,7 @@ function New-CISBreakGlassAccount {
         UserPrincipalName     = $UserPrincipalName
         MailNickname          = $nick
         AccountEnabled        = $true
-        PasswordProfile       = @{ Password=$pwd; ForceChangePasswordNextSignIn=$false }
+        PasswordProfile       = @{ Password=$bgaPwd; ForceChangePasswordNextSignIn=$false }
         PasswordPolicies      = 'DisablePasswordExpiration'
         UsageLocation         = 'PL'
     }
@@ -429,7 +431,7 @@ function New-CISBreakGlassAccount {
     } catch {
         Write-CISLog ("Nie udalo sie przypisac roli GA ({0}) - przypisz recznie w Entra." -f $_.Exception.Message) WARN
     }
-    return [pscustomobject]@{ User=$user; Password=$pwd }
+    return [pscustomobject]@{ User=$user; Password=$bgaPwd }
 }
 function Set-CISBreakGlass {
     param([Parameter(Mandatory)]$User)  # obiekt z .Id i .UserPrincipalName, albo UPN (string)
@@ -499,8 +501,8 @@ function Remove-CISLegacyPolicies {
 
 # ---------- PROFILE / ZESTAWY KONTROLEK ----------
 function Get-CISProfileSelection {
-    param([Parameter(Mandatory)]$Profile, [Parameter(Mandatory)]$Scan)
-    $sel = $Profile.select
+    param([Parameter(Mandatory)]$CisProfile, [Parameter(Mandatory)]$Scan)
+    $sel = $CisProfile.select
     $ids = New-Object System.Collections.Generic.List[string]
     $hasIds=@($sel.ids).Count -gt 0; $hasLvl=@($sel.levels).Count -gt 0; $hasArea=@($sel.areas).Count -gt 0
     foreach ($row in $Scan) {
