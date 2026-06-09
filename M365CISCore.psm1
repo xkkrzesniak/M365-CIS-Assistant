@@ -19,15 +19,17 @@ function Write-CISLog {
     Write-Host ("[{0}] [{1}] {2}" -f (Get-Date -Format 'HH:mm:ss'), $Level, $Message) -ForegroundColor $color
 }
 function Confirm-CISModule {
-    param([string]$Name)
+    param([string]$Name, [switch]$OnlyInstall)
     if (-not (Get-Module -ListAvailable -Name $Name)) {
         Write-CISLog "Instaluje modul $Name..." WARN
         Install-Module -Name $Name -Scope CurrentUser -Force -AllowClobber -ErrorAction Stop
         Write-CISLog "Zainstalowano $Name." OK
     }
-    Write-CISLog "Importuje modul $Name..." INFO
-    Import-Module -Name $Name -Force -ErrorAction Stop
-    Write-CISLog "Zaladowano $Name." OK
+    if (-not $OnlyInstall) {
+        Write-CISLog "Importuje modul $Name..." INFO
+        Import-Module -Name $Name -Force -ErrorAction Stop
+        Write-CISLog "Zaladowano $Name." OK
+    }
 }
 
 # ---------- HELPERY ----------
@@ -66,9 +68,28 @@ function Connect-CISServices {
     $script:Ctx.CaState = if ($ConditionalAccessState -eq 'Enabled') { 'enabled' } else { 'enabledForReportingButNotEnforced' }
 
     if (-not $SkipEntra) {
-        Confirm-CISModule 'Microsoft.Graph'
+        # PS5.1 ma limit 4096 funkcji - import calego Microsoft.Graph (meta) go przekracza.
+        # Instalujemy meta-modul tylko po to by upewnic sie ze podmoduly sa dostepne,
+        # a importujemy wylacznie te ktore sa rzeczywiscie potrzebne.
+        Confirm-CISModule 'Microsoft.Graph' -OnlyInstall
+        $graphSubModules = @(
+            'Microsoft.Graph.Authentication',
+            'Microsoft.Graph.Identity.SignIns',
+            'Microsoft.Graph.Identity.DirectoryManagement',
+            'Microsoft.Graph.Users',
+            'Microsoft.Graph.DeviceManagement',
+            'Microsoft.Graph.DeviceManagement.Administration'
+        )
+        foreach ($m in $graphSubModules) {
+            if (-not (Get-Module -ListAvailable -Name $m)) {
+                Write-CISLog "Instaluje $m..." WARN
+                Install-Module -Name $m -Scope CurrentUser -Force -AllowClobber -ErrorAction Stop
+            }
+            Write-CISLog "Importuje $m..." INFO
+            Import-Module -Name $m -Force -ErrorAction Stop
+        }
         if (-not (Get-Command 'Connect-MgGraph' -ErrorAction SilentlyContinue)) {
-            throw "Import-Module Microsoft.Graph zakonczony, ale Connect-MgGraph nadal niedostepne.`nSprobuj uruchomic ponownie aplikacje. Jesli blad sie powtarza, wykonaj w PowerShell:`n  Uninstall-Module Microsoft.Graph -AllVersions -Force`n  Install-Module Microsoft.Graph -Scope CurrentUser -Force"
+            throw "Connect-MgGraph niedostepne. Zainstaluj recznie:`n  Install-Module Microsoft.Graph.Authentication -Scope CurrentUser -Force"
         }
         Write-CISLog 'Lacze z Microsoft Graph...'
         Connect-MgGraph -NoWelcome -Scopes @(
