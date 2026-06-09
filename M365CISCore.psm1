@@ -13,6 +13,7 @@
 $script:LogCallback        = $null
 $script:DeviceCodeCallback = $null   # scriptblock: param($Url, $Code) -> zwraca scriptblock do zamkniecia okna
 $script:WamBroken          = $false  # set true when WAM broker fails; all subsequent MSAL services use device code
+$script:ExoModFile         = $null   # pelna sciezka do zaladowanego ExchangeOnlineManagement.psd1
 function Set-CISLogCallback        { param([scriptblock]$Callback) $script:LogCallback      = $Callback }
 function Set-CISDeviceCodeCallback { param([scriptblock]$Callback) $script:DeviceCodeCallback = $Callback }
 function Write-CISLog {
@@ -271,22 +272,19 @@ Connect-MgGraph -NoWelcome -UseDeviceAuthentication -Scopes `$s -ErrorAction Sto
             Install-Module ExchangeOnlineManagement -Scope CurrentUser -Force -AllowClobber -ErrorAction SilentlyContinue
             Import-Module ExchangeOnlineManagement -Force -ErrorAction SilentlyContinue
         }
-        Write-CISLog 'Lacze z Exchange Online...'
+        # Pelna sciezka zaladowanego modulu - runspace uzyje DOKLADNIE tej wersji (omija niejednoznacznosc)
+        $script:ExoModFile = (Get-Module ExchangeOnlineManagement).Path
+        $exoLoad = if ($script:ExoModFile) { "Import-Module '$($script:ExoModFile)' -Force" } else { "Import-Module ExchangeOnlineManagement -Force" }
+        Write-CISLog "Lacze z Exchange Online (EXO v$((Get-Module ExchangeOnlineManagement).Version))..."
         if ($script:WamBroken) {
-            Invoke-CISDeviceConnect -ServiceName 'Exchange Online' -ConnectInvoke @'
-Import-Module ExchangeOnlineManagement -Force -ErrorAction SilentlyContinue
-Connect-ExchangeOnline -ShowBanner:$false -Device -ErrorAction Stop
-'@
+            Invoke-CISDeviceConnect -ServiceName 'Exchange Online' -ConnectInvoke "$exoLoad -ErrorAction SilentlyContinue`nConnect-ExchangeOnline -ShowBanner:`$false -Device -ErrorAction Stop"
         } else {
             try {
                 Connect-ExchangeOnline -ShowBanner:$false -ErrorAction Stop
             } catch {
                 if (Test-WamBrokerError $_) {
                     $script:WamBroken = $true
-                    Invoke-CISDeviceConnect -ServiceName 'Exchange Online' -ConnectInvoke @'
-Import-Module ExchangeOnlineManagement -Force -ErrorAction SilentlyContinue
-Connect-ExchangeOnline -ShowBanner:$false -Device -ErrorAction Stop
-'@
+                    Invoke-CISDeviceConnect -ServiceName 'Exchange Online' -ConnectInvoke "$exoLoad -ErrorAction SilentlyContinue`nConnect-ExchangeOnline -ShowBanner:`$false -Device -ErrorAction Stop"
                 } else { throw }
             }
         }
@@ -314,22 +312,18 @@ Connect-ExchangeOnline -ShowBanner:$false -Device -ErrorAction Stop
     }
     if (-not $SkipTeams) {
         Confirm-CISModule 'MicrosoftTeams'
+        $teamsModFile = (Get-Module MicrosoftTeams).Path
+        $teamsLoad = if ($teamsModFile) { "Import-Module '$teamsModFile' -Force" } else { "Import-Module MicrosoftTeams -Force" }
         Write-CISLog 'Lacze z Microsoft Teams...'
         if ($script:WamBroken) {
-            Invoke-CISDeviceConnect -ServiceName 'Microsoft Teams' -ConnectInvoke @'
-Import-Module MicrosoftTeams -Force -ErrorAction SilentlyContinue
-Connect-MicrosoftTeams -UseDeviceAuthentication -ErrorAction Stop | Out-Null
-'@
+            Invoke-CISDeviceConnect -ServiceName 'Microsoft Teams' -ConnectInvoke "$teamsLoad -ErrorAction SilentlyContinue`nConnect-MicrosoftTeams -UseDeviceAuthentication -ErrorAction Stop | Out-Null"
         } else {
             try {
                 Connect-MicrosoftTeams -ErrorAction Stop | Out-Null
             } catch {
                 if (Test-WamBrokerError $_) {
                     $script:WamBroken = $true
-                    Invoke-CISDeviceConnect -ServiceName 'Microsoft Teams' -ConnectInvoke @'
-Import-Module MicrosoftTeams -Force -ErrorAction SilentlyContinue
-Connect-MicrosoftTeams -UseDeviceAuthentication -ErrorAction Stop | Out-Null
-'@
+                    Invoke-CISDeviceConnect -ServiceName 'Microsoft Teams' -ConnectInvoke "$teamsLoad -ErrorAction SilentlyContinue`nConnect-MicrosoftTeams -UseDeviceAuthentication -ErrorAction Stop | Out-Null"
                 } else { throw }
             }
         }
@@ -342,22 +336,18 @@ Connect-MicrosoftTeams -UseDeviceAuthentication -ErrorAction Stop | Out-Null
         if (-not $exoLoaded -or ($exoLoadedVer -and $exoLoadedVer -lt [version]'3.2.0')) {
             Confirm-CISModule 'ExchangeOnlineManagement' -MinVersion '3.2.0'
         }
+        $purviewModFile = if ($script:ExoModFile) { $script:ExoModFile } else { (Get-Module ExchangeOnlineManagement).Path }
+        $purviewLoad = if ($purviewModFile) { "Import-Module '$purviewModFile' -Force" } else { "Import-Module ExchangeOnlineManagement -Force" }
         Write-CISLog 'Lacze z Microsoft Purview (Security & Compliance Center)...' INFO
         if ($script:WamBroken) {
-            Invoke-CISDeviceConnect -ServiceName 'Purview' -ConnectInvoke @'
-Import-Module ExchangeOnlineManagement -Force -ErrorAction SilentlyContinue
-Connect-IPPSSession -ShowBanner:$false -Device -ErrorAction Stop
-'@
+            Invoke-CISDeviceConnect -ServiceName 'Purview' -ConnectInvoke "$purviewLoad -ErrorAction SilentlyContinue`nConnect-IPPSSession -ShowBanner:`$false -Device -ErrorAction Stop"
         } else {
             try {
                 Connect-IPPSSession -ShowBanner:$false -ErrorAction Stop
             } catch {
                 if (Test-WamBrokerError $_) {
                     $script:WamBroken = $true
-                    Invoke-CISDeviceConnect -ServiceName 'Purview' -ConnectInvoke @'
-Import-Module ExchangeOnlineManagement -Force -ErrorAction SilentlyContinue
-Connect-IPPSSession -ShowBanner:$false -Device -ErrorAction Stop
-'@
+                    Invoke-CISDeviceConnect -ServiceName 'Purview' -ConnectInvoke "$purviewLoad -ErrorAction SilentlyContinue`nConnect-IPPSSession -ShowBanner:`$false -Device -ErrorAction Stop"
                 } else { throw }
             }
         }
