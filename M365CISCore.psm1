@@ -835,9 +835,8 @@ $ControlRegistry = @(
             New-TestResult $ok ("PermissionGrantPolicies: "+($a.DefaultUserRolePermissions.PermissionGrantPoliciesAssigned -join ','))
         }
         Apply={
-            $a=Get-MgPolicyAuthorizationPolicy
-            Update-MgPolicyAuthorizationPolicy -AuthorizationPolicyId $a.Id `
-                -DefaultUserRolePermissions @{ permissionGrantPoliciesAssigned=@() }
+            $body = @{ defaultUserRolePermissions = @{ permissionGrantPoliciesAssigned = @() } }
+            Invoke-MgGraphRequest -Method PATCH -Uri 'https://graph.microsoft.com/v1.0/policies/authorizationPolicy' -Body $body -ContentType 'application/json' | Out-Null
         }
     },
     [pscustomobject]@{
@@ -903,15 +902,19 @@ $ControlRegistry = @(
         Id='ENTRA-PORTAL'; Service='Graph'; Area='Entra ID'; Cis='1.1.2'; Level=1
         Name='Ogranicz dostęp do portalu Entra tylko do administratorów'
         Test={
-            $tmplId = (Get-MgDirectorySettingTemplate | Where-Object DisplayName -eq 'Authorization Policy' | Select-Object -First 1).Id
-            $setting = Get-MgDirectorySetting | Where-Object TemplateId -eq $tmplId | Select-Object -First 1
-            if (-not $setting) { return New-TestResult $false 'Brak ustawienia (domyslnie: dostep dla wszystkich)' }
-            $val = ($setting.Values | Where-Object Name -eq 'EnableAdminPanelRestriction').Value
-            New-TestResult ($val -eq 'true') ("EnableAdminPanelRestriction=$val")
+            try {
+                $tmplId = (Get-MgDirectorySettingTemplate -All -ErrorAction Stop | Where-Object DisplayName -eq 'Authorization Policy' | Select-Object -First 1).Id
+                if (-not $tmplId) { return New-TestResult $false 'Brak szablonu Authorization Policy' }
+                $setting = Get-MgDirectorySetting -All -ErrorAction Stop | Where-Object TemplateId -eq $tmplId | Select-Object -First 1
+                if (-not $setting) { return New-TestResult $false 'Brak ustawienia (domyslnie: dostep dla wszystkich)' }
+                $val = ($setting.Values | Where-Object Name -eq 'EnableAdminPanelRestriction').Value
+                New-TestResult ($val -eq 'true') ("EnableAdminPanelRestriction=$val")
+            } catch { New-TestResult $false "Blad odczytu: $_" }
         }
         Apply={
-            $tmpl = Get-MgDirectorySettingTemplate | Where-Object DisplayName -eq 'Authorization Policy' | Select-Object -First 1
-            $setting = Get-MgDirectorySetting | Where-Object TemplateId -eq $tmpl.Id | Select-Object -First 1
+            $tmpl = Get-MgDirectorySettingTemplate -All -ErrorAction Stop | Where-Object DisplayName -eq 'Authorization Policy' | Select-Object -First 1
+            if (-not $tmpl) { throw 'Brak szablonu Authorization Policy' }
+            $setting = Get-MgDirectorySetting -All -ErrorAction Stop | Where-Object TemplateId -eq $tmpl.Id | Select-Object -First 1
             $vals = @(@{Name='EnableAdminPanelRestriction';Value='true'})
             if ($setting) { Update-MgDirectorySetting -DirectorySettingId $setting.Id -Values $vals }
             else           { New-MgDirectorySetting -TemplateId $tmpl.Id -Values $vals }
@@ -922,16 +925,18 @@ $ControlRegistry = @(
         Id='ENTRA-M365GROUP'; Service='Graph'; Area='Entra ID'; Cis='1.1.8'; Level=1
         Name='Zablokuj tworzenie grup Microsoft 365 przez zwykłych użytkowników'
         Test={
-            $tmpl = Get-MgDirectorySettingTemplate | Where-Object DisplayName -eq 'Group.Unified' | Select-Object -First 1
-            if (-not $tmpl) { return New-TestResult $false 'Brak szablonu Group.Unified' }
-            $setting = Get-MgDirectorySetting | Where-Object TemplateId -eq $tmpl.Id | Select-Object -First 1
-            if (-not $setting) { return New-TestResult $false 'Brak ustawienia - domyslnie tworzenie wlaczone' }
-            $val = ($setting.Values | Where-Object Name -eq 'EnableGroupCreation').Value
-            New-TestResult ($val -eq 'false') ("EnableGroupCreation=$val")
+            try {
+                $tmpl = Get-MgDirectorySettingTemplate -All -ErrorAction Stop | Where-Object DisplayName -eq 'Group.Unified' | Select-Object -First 1
+                if (-not $tmpl) { return New-TestResult $false 'Brak szablonu Group.Unified' }
+                $setting = Get-MgDirectorySetting -All -ErrorAction Stop | Where-Object TemplateId -eq $tmpl.Id | Select-Object -First 1
+                if (-not $setting) { return New-TestResult $false 'Brak ustawienia - domyslnie tworzenie wlaczone' }
+                $val = ($setting.Values | Where-Object Name -eq 'EnableGroupCreation').Value
+                New-TestResult ($val -eq 'false') ("EnableGroupCreation=$val")
+            } catch { New-TestResult $false "Blad odczytu: $_" }
         }
         Apply={
-            $tmpl = Get-MgDirectorySettingTemplate | Where-Object DisplayName -eq 'Group.Unified' | Select-Object -First 1
-            $setting = Get-MgDirectorySetting | Where-Object TemplateId -eq $tmpl.Id | Select-Object -First 1
+            $tmpl = Get-MgDirectorySettingTemplate -All -ErrorAction Stop | Where-Object DisplayName -eq 'Group.Unified' | Select-Object -First 1
+            $setting = Get-MgDirectorySetting -All -ErrorAction Stop | Where-Object TemplateId -eq $tmpl.Id | Select-Object -First 1
             if ($setting) {
                 $newVals = @()
                 foreach ($v in $setting.Values) {
@@ -1066,8 +1071,7 @@ $ControlRegistry = @(
                 -PhishSpamAction Quarantine `
                 -HighConfidencePhishAction Quarantine `
                 -SpamAction MoveToJmf `
-                -BulkSpamAction MoveToJmf `
-                -EnableSafetyTips $true
+                -BulkSpamAction MoveToJmf
         }
     },
     [pscustomobject]@{
@@ -1213,10 +1217,19 @@ $ControlRegistry = @(
         Name='Czat na spotkaniach: anonimowi użytkownicy bez dostępu'
         Test={
             $p = Get-CsTeamsMeetingPolicy -Identity Global
-            $ok = $p.AllowMeetingChat -in @('EnabledExceptAnonymous','Disabled')
-            New-TestResult $ok ("AllowMeetingChat="+$p.AllowMeetingChat)
+            # Teams PS 6.x: MeetingChatEnabledType; starsze: AllowMeetingChat
+            $val = if ($p.PSObject.Properties['MeetingChatEnabledType']) { $p.MeetingChatEnabledType } else { $p.AllowMeetingChat }
+            $ok = $val -in @('EnabledExceptAnonymous','Disabled')
+            New-TestResult $ok ("MeetingChat=$val")
         }
-        Apply={ Set-CsTeamsMeetingPolicy -Identity Global -AllowMeetingChat EnabledExceptAnonymous }
+        Apply={
+            $p = Get-CsTeamsMeetingPolicy -Identity Global
+            if ($p.PSObject.Properties['MeetingChatEnabledType']) {
+                Set-CsTeamsMeetingPolicy -Identity Global -MeetingChatEnabledType EnabledExceptAnonymous
+            } else {
+                Set-CsTeamsMeetingPolicy -Identity Global -AllowMeetingChat EnabledExceptAnonymous
+            }
+        }
     },
     [pscustomobject]@{
         Id='ENTRA-BREAKGLASS'; Service='Graph'; Area='Entra ID'; Cis='1.4'; Level=1
@@ -1513,13 +1526,24 @@ $ControlRegistry = @(
         Test={
             try {
                 $s = Get-TenantSettings -ErrorAction Stop
-                New-TestResult ([bool]$s.disableShareWithEveryoneByNonAdminUsers) ("disableShareAll=$($s.disableShareWithEveryoneByNonAdminUsers)")
-            } catch { New-TestResult $false "Blad: $_" }
+                $val = $s.disableShareWithEveryoneByNonAdminUsers
+                if ($null -eq $val) {
+                    New-TestResult $false "Wlasciwos disableShareWithEveryoneByNonAdminUsers niedostepna w tej wersji modulu - sprawdz recznie w PPAC"
+                } else {
+                    New-TestResult ([bool]$val) ("disableShareAll=$val")
+                }
+            } catch { New-TestResult $false "Blad odczytu ustawien PP: $_" }
         }
         Apply={
-            $s = Get-TenantSettings
-            $s.disableShareWithEveryoneByNonAdminUsers = $true
-            Set-TenantSettings $s | Out-Null
+            try {
+                $s = Get-TenantSettings -ErrorAction Stop
+                if ($null -ne $s.disableShareWithEveryoneByNonAdminUsers) {
+                    $s.disableShareWithEveryoneByNonAdminUsers = $true
+                    Set-TenantSettings $s | Out-Null
+                } else {
+                    Write-CISLog 'PP-SHAREWITHTENANT: wlasciwos niedostepna w tej wersji modulu. Skonfiguruj recznie: PPAC > Settings > Tenant settings > Canvas apps.' WARN
+                }
+            } catch { Write-CISLog "PP-SHAREWITHTENANT blad: $_" ERROR }
         }
     },
     #----- MICROSOFT COPILOT (M365 AI) -----
