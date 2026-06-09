@@ -953,7 +953,8 @@ $ControlRegistry = @(
         Id='EXO-AUDIT'; Service='EXO'; Area='Exchange'; Cis='3.1.1'; Level=1
         Name='Unified Audit Log włączony'
         Test={ $v=(Get-AdminAuditLogConfig).UnifiedAuditLogIngestionEnabled; New-TestResult ([bool]$v) "Enabled=$v" }
-        Apply={ Set-AdminAuditLogConfig -UnifiedAuditLogIngestionEnabled $true }
+        Apply={ Set-AdminAuditLogConfig -UnifiedAuditLogIngestionEnabled $true -WarningAction SilentlyContinue | Out-Null
+                Write-CISLog 'EXO-AUDIT: jesli UAL nadal nie aktywny, wlacz recznie w Purview > Audit.' WARN }
     },
     [pscustomobject]@{
         Id='EXO-MBXAUDIT'; Service='EXO'; Area='Exchange'; Cis='6.1.1'; Level=1
@@ -983,7 +984,9 @@ $ControlRegistry = @(
         }
         Apply={
             Get-CASMailboxPlan | Where-Object {$_.ImapEnabled -or $_.PopEnabled} | Set-CASMailboxPlan -ImapEnabled $false -PopEnabled $false
-            Get-CASMailbox -ResultSize Unlimited | Where-Object {$_.ImapEnabled -or $_.PopEnabled} | Set-CASMailbox -ImapEnabled $false -PopEnabled $false
+            Get-CASMailbox -ResultSize Unlimited | Where-Object {$_.ImapEnabled -or $_.PopEnabled} | ForEach-Object {
+                Set-CASMailbox -Identity $_.ExchangeGuid -ImapEnabled $false -PopEnabled $false -ErrorAction SilentlyContinue
+            }
         }
     },
     [pscustomobject]@{
@@ -1079,8 +1082,8 @@ $ControlRegistry = @(
         Apply={
             Set-HostedOutboundSpamFilterPolicy -Identity Default `
                 -ActionWhenThresholdReached BlockUser `
-                -BccSuspiciousOutboundMail $true `
-                -NotifyOutboundSpam $true
+                -BccSuspiciousOutboundMail $true
+            Write-CISLog 'MDO-ANTISPAM-OUT: NotifyOutboundSpam pominiety - wymaga adresu odbiorcy. Skonfiguruj recznie w EAC > Policies > Anti-spam.' WARN
         }
     },
 
@@ -1121,8 +1124,11 @@ $ControlRegistry = @(
         Name='Ogranicz udostępnianie zewnętrzne + wygasanie linków'
         Test={ $t=Get-SPOTenant; $ok = $t.SharingCapability -in @('Disabled','ExistingExternalUserSharingOnly')
                New-TestResult $ok ("SharingCapability="+$t.SharingCapability) }
-        Apply={ Set-SPOTenant -SharingCapability ExistingExternalUserSharingOnly -DefaultSharingLinkType Direct `
-                    -DefaultLinkPermission View -RequireAnonymousLinksExpireInDays 30 -PreventExternalUsersFromResharing $true }
+        Apply={
+            # ExistingExternalUserSharingOnly wylacza anonimowe linki - RequireAnonymousLinksExpireInDays jest wtedy nieprawidlowy
+            Set-SPOTenant -SharingCapability ExistingExternalUserSharingOnly -DefaultSharingLinkType Direct `
+                -DefaultLinkPermission View -PreventExternalUsersFromResharing $true -WarningAction SilentlyContinue
+        }
     },
     [pscustomobject]@{
         Id='SPO-LEGACYAUTH'; Service='SPO'; Area='SharePoint'; Cis='7.2.x'; Level=1
