@@ -903,21 +903,33 @@ $ControlRegistry = @(
         Name='Ogranicz dostęp do portalu Entra tylko do administratorów'
         Test={
             try {
-                $tmplId = (Get-MgDirectorySettingTemplate -All -ErrorAction Stop | Where-Object DisplayName -eq 'Authorization Policy' | Select-Object -First 1).Id
+                $tmplId = ((Invoke-MgGraphRequest -Method GET -Uri 'https://graph.microsoft.com/v1.0/directorySettingTemplates').value |
+                    Where-Object displayName -eq 'Authorization Policy' | Select-Object -First 1).id
                 if (-not $tmplId) { return New-TestResult $false 'Brak szablonu Authorization Policy' }
-                $setting = Get-MgDirectorySetting -All -ErrorAction Stop | Where-Object TemplateId -eq $tmplId | Select-Object -First 1
+                $setting = (Invoke-MgGraphRequest -Method GET -Uri 'https://graph.microsoft.com/v1.0/directorySettings').value |
+                    Where-Object templateId -eq $tmplId | Select-Object -First 1
                 if (-not $setting) { return New-TestResult $false 'Brak ustawienia (domyslnie: dostep dla wszystkich)' }
-                $val = ($setting.Values | Where-Object Name -eq 'EnableAdminPanelRestriction').Value
+                $val = ($setting.values | Where-Object name -eq 'EnableAdminPanelRestriction').value
                 New-TestResult ($val -eq 'true') ("EnableAdminPanelRestriction=$val")
             } catch { New-TestResult $false "Blad odczytu: $_" }
         }
         Apply={
-            $tmpl = Get-MgDirectorySettingTemplate -All -ErrorAction Stop | Where-Object DisplayName -eq 'Authorization Policy' | Select-Object -First 1
-            if (-not $tmpl) { throw 'Brak szablonu Authorization Policy' }
-            $setting = Get-MgDirectorySetting -All -ErrorAction Stop | Where-Object TemplateId -eq $tmpl.Id | Select-Object -First 1
-            $vals = @(@{Name='EnableAdminPanelRestriction';Value='true'})
-            if ($setting) { Update-MgDirectorySetting -DirectorySettingId $setting.Id -Values $vals }
-            else           { New-MgDirectorySetting -TemplateId $tmpl.Id -Values $vals }
+            $templates = (Invoke-MgGraphRequest -Method GET -Uri 'https://graph.microsoft.com/v1.0/directorySettingTemplates').value
+            $tmpl = $templates | Where-Object displayName -eq 'Authorization Policy' | Select-Object -First 1
+            if (-not $tmpl) { throw 'Brak szablonu Authorization Policy w directorySettingTemplates' }
+            $settings = (Invoke-MgGraphRequest -Method GET -Uri 'https://graph.microsoft.com/v1.0/directorySettings').value
+            $setting = $settings | Where-Object templateId -eq $tmpl.id | Select-Object -First 1
+            $newVals = @(@{ name='EnableAdminPanelRestriction'; value='true' })
+            if ($setting) {
+                Invoke-MgGraphRequest -Method PATCH -Uri "https://graph.microsoft.com/v1.0/directorySettings/$($setting.id)" `
+                    -Body @{ values = $newVals } -ContentType 'application/json' | Out-Null
+            } else {
+                $allVals = $tmpl.values | ForEach-Object {
+                    @{ name=$_.name; value=if($_.name -eq 'EnableAdminPanelRestriction'){'true'}else{$_.defaultValue} }
+                }
+                Invoke-MgGraphRequest -Method POST -Uri 'https://graph.microsoft.com/v1.0/directorySettings' `
+                    -Body @{ templateId=$tmpl.id; values=$allVals } -ContentType 'application/json' | Out-Null
+            }
         }
     },
 
@@ -926,29 +938,34 @@ $ControlRegistry = @(
         Name='Zablokuj tworzenie grup Microsoft 365 przez zwykłych użytkowników'
         Test={
             try {
-                $tmpl = Get-MgDirectorySettingTemplate -All -ErrorAction Stop | Where-Object DisplayName -eq 'Group.Unified' | Select-Object -First 1
+                $tmpl = (Invoke-MgGraphRequest -Method GET -Uri 'https://graph.microsoft.com/v1.0/directorySettingTemplates').value |
+                    Where-Object displayName -eq 'Group.Unified' | Select-Object -First 1
                 if (-not $tmpl) { return New-TestResult $false 'Brak szablonu Group.Unified' }
-                $setting = Get-MgDirectorySetting -All -ErrorAction Stop | Where-Object TemplateId -eq $tmpl.Id | Select-Object -First 1
-                if (-not $setting) { return New-TestResult $false 'Brak ustawienia - domyslnie tworzenie wlaczone' }
-                $val = ($setting.Values | Where-Object Name -eq 'EnableGroupCreation').Value
+                $setting = (Invoke-MgGraphRequest -Method GET -Uri 'https://graph.microsoft.com/v1.0/directorySettings').value |
+                    Where-Object templateId -eq $tmpl.id | Select-Object -First 1
+                if (-not $setting) { return New-TestResult $false 'Brak ustawienia - domyslnie tworzenie wlaczone dla wszystkich' }
+                $val = ($setting.values | Where-Object name -eq 'EnableGroupCreation').value
                 New-TestResult ($val -eq 'false') ("EnableGroupCreation=$val")
             } catch { New-TestResult $false "Blad odczytu: $_" }
         }
         Apply={
-            $tmpl = Get-MgDirectorySettingTemplate -All -ErrorAction Stop | Where-Object DisplayName -eq 'Group.Unified' | Select-Object -First 1
-            $setting = Get-MgDirectorySetting -All -ErrorAction Stop | Where-Object TemplateId -eq $tmpl.Id | Select-Object -First 1
+            $templates = (Invoke-MgGraphRequest -Method GET -Uri 'https://graph.microsoft.com/v1.0/directorySettingTemplates').value
+            $tmpl = $templates | Where-Object displayName -eq 'Group.Unified' | Select-Object -First 1
+            if (-not $tmpl) { throw 'Brak szablonu Group.Unified' }
+            $settings = (Invoke-MgGraphRequest -Method GET -Uri 'https://graph.microsoft.com/v1.0/directorySettings').value
+            $setting = $settings | Where-Object templateId -eq $tmpl.id | Select-Object -First 1
             if ($setting) {
-                $newVals = @()
-                foreach ($v in $setting.Values) {
-                    $newVals += if ($v.Name -eq 'EnableGroupCreation') { @{Name='EnableGroupCreation';Value='false'} }
-                                else { @{Name=$v.Name;Value=$v.Value} }
+                $newVals = $setting.values | ForEach-Object {
+                    @{ name=$_.name; value=if($_.name -eq 'EnableGroupCreation'){'false'}else{$_.value} }
                 }
-                Update-MgDirectorySetting -DirectorySettingId $setting.Id -Values $newVals
+                Invoke-MgGraphRequest -Method PATCH -Uri "https://graph.microsoft.com/v1.0/directorySettings/$($setting.id)" `
+                    -Body @{ values=$newVals } -ContentType 'application/json' | Out-Null
             } else {
-                $allVals = $tmpl.Values | ForEach-Object {
-                    @{Name=$_.Name; Value=if($_.Name -eq 'EnableGroupCreation'){'false'}else{$_.DefaultValue}}
+                $allVals = $tmpl.values | ForEach-Object {
+                    @{ name=$_.name; value=if($_.name -eq 'EnableGroupCreation'){'false'}else{$_.defaultValue} }
                 }
-                New-MgDirectorySetting -TemplateId $tmpl.Id -Values $allVals | Out-Null
+                Invoke-MgGraphRequest -Method POST -Uri 'https://graph.microsoft.com/v1.0/directorySettings' `
+                    -Body @{ templateId=$tmpl.id; values=$allVals } -ContentType 'application/json' | Out-Null
             }
         }
     },

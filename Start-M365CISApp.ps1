@@ -658,12 +658,18 @@ $ctrl.btnApply.Add_Click({
                     if ($j -ge $script:_ScanTotal) {
                         $script:_ScanTimer.Stop()
                         $script:LastScan = $script:_ScanResults.ToArray()
-                        $ctrl.btnScan.IsEnabled  = $true
-                        $ctrl.btnApply.IsEnabled = $true
-                        $ctrl.prgScan.Visibility = 'Collapsed'
+                        $ctrl.btnScan.IsEnabled       = $true
+                        $ctrl.btnApply.IsEnabled       = $true
+                        $ctrl.btnReport.IsEnabled      = $true
+                        $ctrl.btnExportCsv.IsEnabled   = $true
+                        $ctrl.btnExportWord.IsEnabled  = $true
+                        $ctrl.btnEmail.IsEnabled        = $true
+                        $ctrl.prgScan.Visibility       = 'Collapsed'
                         $ok2  = @($script:_ScanResults | Where-Object Status -eq 'Zgodne').Count
                         $nok2 = @($script:_ScanResults | Where-Object Status -eq 'NIEZGODNE').Count
-                        Set-Status ("Po wdrozeniu: {0}/{1} OK, {2} niezgodne." -f $ok2,$script:_ScanTotal,$nok2)
+                        $pct2 = if ($script:_ScanTotal -gt 0) { [int]([math]::Round($ok2/$script:_ScanTotal*100)) } else { 0 }
+                        $ctrl.lblStatus.Foreground = if ($pct2 -ge 80) { '#27ae60' } elseif ($pct2 -ge 50) { '#e67e22' } else { '#c0392b' }
+                        Set-Status ("Po wdrozeniu: {0}% ({1}/{2} OK) | Niezgodne: {3}" -f $pct2,$ok2,$script:_ScanTotal,$nok2)
                         return
                     }
                     $c2 = $script:_ScanRegistry[$j]
