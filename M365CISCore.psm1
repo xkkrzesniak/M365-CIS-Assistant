@@ -595,6 +595,12 @@ $script:ControlDocs = @{
     'ENTRA-CA-MFA-ADMIN'          = 'CAP03: polityka CA wymagająca MFA dla ról uprzywilejowanych (m.in. Global, Security, Exchange, SharePoint Administrator), z wykluczeniem konta break-glass.'
     'ENTRA-CONSENT'              = 'Wyłączono samodzielne udzielanie przez użytkowników zgód na aplikacje (PermissionGrantPolicies = puste) - wymagana zgoda administratora.'
     'ENTRA-PWD-NOEXPIRE'         = 'Ustawiono polityki haseł wszystkich domen jako niewygasające (zalecane przy wymuszonym MFA i modern auth).'
+    'ENTRA-APPREG'               = 'Zablokowano rejestrowanie aplikacji Azure AD przez zwykłych użytkowników (AllowedToCreateApps = false). Aplikacje może rejestrować wyłącznie administrator.'
+    'ENTRA-TENANT-CREATE'        = 'Zablokowano tworzenie nowych tenantów Microsoft Entra przez zwykłych użytkowników (AllowedToCreateTenants = false).'
+    'ENTRA-SECGROUP'             = 'Zablokowano tworzenie grup zabezpieczeń przez zwykłych użytkowników (AllowedToCreateSecurityGroups = false). Grupy tworzy wyłącznie administrator.'
+    'ENTRA-GUEST-PERMS'          = 'Ustawiono najbardziej restrykcyjne uprawnienia gości (GuestUserRoleId = Restricted Guest User). Goście widzą tylko swój własny profil i nie mogą enumerować katalogu.'
+    'ENTRA-GUEST-INVITE'         = 'Zapraszanie gości do tenanta ograniczono do administratorów i użytkowników z rolą Guest Inviter (AllowInvitesFrom = adminsAndGuestInviters).'
+    'ENTRA-PORTAL'               = 'Ograniczono dostęp do portalu Microsoft Entra tylko do administratorów (EnableAdminPanelRestriction = true). Zwykli użytkownicy nie mogą przeglądać katalogu przez portal.'
     'EXO-AUDIT'                  = 'Włączono Unified Audit Log (rejestrowanie zdarzeń w całym tenancie).'
     'EXO-MBXAUDIT'              = 'Włączono domyślny audyt skrzynek pocztowych (AuditDisabled = false).'
     'EXO-MODERNAUTH'           = 'Wymuszono Modern Authentication (OAuth2ClientProfileEnabled = true).'
@@ -801,6 +807,74 @@ $ControlRegistry = @(
             if($bad){New-TestResult $false ("Domeny z wygasaniem: "+($bad.Id -join ','))} else {New-TestResult $true 'Wszystkie domeny: bez wygasania'}
         }
         Apply={ Get-MgDomain | ForEach-Object { Update-MgDomain -DomainId $_.Id -PasswordValidityPeriodInDays 2147483647 -PasswordNotificationWindowInDays 30 -ErrorAction SilentlyContinue } }
+    },
+
+    #----- ENTRA ID - USTAWIENIA UZYTKOWNIKOW -----
+    [pscustomobject]@{
+        Id='ENTRA-APPREG'; Service='Graph'; Area='Entra ID'; Cis='1.1.3'; Level=1
+        Name='Zablokuj rejestrowanie aplikacji przez zwykłych użytkowników'
+        Test={
+            $ok = -not (Get-MgPolicyAuthorizationPolicy).DefaultUserRolePermissions.AllowedToCreateApps
+            New-TestResult $ok ("AllowedToCreateApps="+((Get-MgPolicyAuthorizationPolicy).DefaultUserRolePermissions.AllowedToCreateApps))
+        }
+        Apply={ Update-MgPolicyAuthorizationPolicy -DefaultUserRolePermissions @{ allowedToCreateApps=$false } }
+    },
+    [pscustomobject]@{
+        Id='ENTRA-TENANT-CREATE'; Service='Graph'; Area='Entra ID'; Cis='1.1.4'; Level=1
+        Name='Zablokuj tworzenie nowych tenantów przez zwykłych użytkowników'
+        Test={
+            $ok = -not (Get-MgPolicyAuthorizationPolicy).DefaultUserRolePermissions.AllowedToCreateTenants
+            New-TestResult $ok ("AllowedToCreateTenants="+((Get-MgPolicyAuthorizationPolicy).DefaultUserRolePermissions.AllowedToCreateTenants))
+        }
+        Apply={ Update-MgPolicyAuthorizationPolicy -DefaultUserRolePermissions @{ allowedToCreateTenants=$false } }
+    },
+    [pscustomobject]@{
+        Id='ENTRA-SECGROUP'; Service='Graph'; Area='Entra ID'; Cis='1.1.6'; Level=1
+        Name='Zablokuj tworzenie grup zabezpieczeń przez zwykłych użytkowników'
+        Test={
+            $ok = -not (Get-MgPolicyAuthorizationPolicy).DefaultUserRolePermissions.AllowedToCreateSecurityGroups
+            New-TestResult $ok ("AllowedToCreateSecurityGroups="+((Get-MgPolicyAuthorizationPolicy).DefaultUserRolePermissions.AllowedToCreateSecurityGroups))
+        }
+        Apply={ Update-MgPolicyAuthorizationPolicy -DefaultUserRolePermissions @{ allowedToCreateSecurityGroups=$false } }
+    },
+    [pscustomobject]@{
+        Id='ENTRA-GUEST-PERMS'; Service='Graph'; Area='Entra ID'; Cis='1.1.7'; Level=1
+        Name='Uprawnienia gości - najbardziej restrykcyjne'
+        # GuestUserRoleId: 2af84b1e = Restricted Guest User (najrestrykcyjniejszy)
+        Test={
+            $roleId = (Get-MgPolicyAuthorizationPolicy).GuestUserRoleId
+            $ok = ($roleId -eq '2af84b1e-32c8-42b7-82bc-daa82404023b')
+            New-TestResult $ok ("GuestUserRoleId=$roleId")
+        }
+        Apply={ Update-MgPolicyAuthorizationPolicy -GuestUserRoleId '2af84b1e-32c8-42b7-82bc-daa82404023b' }
+    },
+    [pscustomobject]@{
+        Id='ENTRA-GUEST-INVITE'; Service='Graph'; Area='Entra ID'; Cis='1.1.5'; Level=1
+        Name='Zapraszanie gości - tylko administratorzy i Guest Inviters'
+        Test={
+            $v = (Get-MgPolicyAuthorizationPolicy).AllowInvitesFrom
+            $ok = $v -in @('adminsAndGuestInviters','adminsOnly','none')
+            New-TestResult $ok ("AllowInvitesFrom=$v")
+        }
+        Apply={ Update-MgPolicyAuthorizationPolicy -AllowInvitesFrom 'adminsAndGuestInviters' }
+    },
+    [pscustomobject]@{
+        Id='ENTRA-PORTAL'; Service='Graph'; Area='Entra ID'; Cis='1.1.2'; Level=1
+        Name='Ogranicz dostęp do portalu Entra tylko do administratorów'
+        Test={
+            $tmplId = (Get-MgDirectorySettingTemplate | Where-Object DisplayName -eq 'Authorization Policy' | Select-Object -First 1).Id
+            $setting = Get-MgDirectorySetting | Where-Object TemplateId -eq $tmplId | Select-Object -First 1
+            if (-not $setting) { return New-TestResult $false 'Brak ustawienia (domyslnie: dostep dla wszystkich)' }
+            $val = ($setting.Values | Where-Object Name -eq 'EnableAdminPanelRestriction').Value
+            New-TestResult ($val -eq 'true') ("EnableAdminPanelRestriction=$val")
+        }
+        Apply={
+            $tmpl = Get-MgDirectorySettingTemplate | Where-Object DisplayName -eq 'Authorization Policy' | Select-Object -First 1
+            $setting = Get-MgDirectorySetting | Where-Object TemplateId -eq $tmpl.Id | Select-Object -First 1
+            $vals = @(@{Name='EnableAdminPanelRestriction';Value='true'})
+            if ($setting) { Update-MgDirectorySetting -DirectorySettingId $setting.Id -Values $vals }
+            else           { New-MgDirectorySetting -TemplateId $tmpl.Id -Values $vals }
+        }
     },
 
     #----- EXCHANGE ONLINE / DEFENDER FOR OFFICE 365 -----
