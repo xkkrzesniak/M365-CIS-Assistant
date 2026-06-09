@@ -1116,10 +1116,8 @@ $ControlRegistry = @(
             New-TestResult $ok ("Action="+$p.ActionWhenThresholdReached+"; BccSuspicious="+$p.BccSuspiciousOutboundMail)
         }
         Apply={
-            Set-HostedOutboundSpamFilterPolicy -Identity Default `
-                -ActionWhenThresholdReached BlockUser `
-                -BccSuspiciousOutboundMail $true
-            Write-CISLog 'MDO-ANTISPAM-OUT: NotifyOutboundSpam pominiety - wymaga adresu odbiorcy. Skonfiguruj recznie w EAC > Policies > Anti-spam.' WARN
+            Set-HostedOutboundSpamFilterPolicy -Identity Default -ActionWhenThresholdReached BlockUser
+            Write-CISLog 'MDO-ANTISPAM-OUT: ActionWhenThresholdReached=BlockUser. BccSuspiciousOutboundMail pominiety - wymaga adresow odbiorcow. Skonfiguruj recznie w EAC > Anti-spam > Outbound > Notifications.' WARN
         }
     },
 
