@@ -385,17 +385,13 @@ function Connect-CISServices {
         if (-not $tn -and $TenantDomain) { $tn = ($TenantDomain -split '\.')[0] }
         if (-not $tn) { Write-CISLog 'Brak nazwy tenanta - pomijam SharePoint.' WARN }
         else {
-            Confirm-CISModule 'PnP.PowerShell'
+            Confirm-CISModule 'Microsoft.Online.SharePoint.PowerShell'
             $spoAdminUrl = "https://$tn-admin.sharepoint.com"
-            Write-CISLog ("Lacze z SharePoint Admin via PnP ({0})..." -f $spoAdminUrl) INFO
-            try {
-                # -Interactive = MSAL systemowa przegladarka (SSO z Graph - zazwyczaj bez dodatkowego logowania)
-                Connect-PnPOnline -Url $spoAdminUrl -Interactive -ErrorAction Stop
-                $script:Ctx.Connected.SPO = $true
-                Write-CISLog 'SharePoint Online (PnP) - polaczono.' OK
-            } catch {
-                Write-CISLog "Blad polaczenia SPO: $($_.Exception.Message)" WARN
-            }
+            Write-CISLog ("Lacze z SharePoint Admin ({0})..." -f $spoAdminUrl) INFO
+            # Connect-SPOService uzywa nowoczesnego auth (MSAL) - z SSO po zalogowaniu do Graph powinno przejsc cicho
+            Connect-SPOService -Url $spoAdminUrl -ErrorAction Stop
+            $script:Ctx.Connected.SPO = $true
+            Write-CISLog 'SharePoint Online - polaczono.' OK
         }
     }
     if (-not $SkipTeams) {
@@ -428,7 +424,7 @@ function Disconnect-CISServices {
     try { Disconnect-MgGraph -ErrorAction SilentlyContinue | Out-Null } catch { }
     try { Disconnect-ExchangeOnline -Confirm:$false -ErrorAction SilentlyContinue } catch { }
     try { Disconnect-IPPSSession -Confirm:$false -ErrorAction SilentlyContinue } catch { }
-    try { Disconnect-PnPOnline -ErrorAction SilentlyContinue } catch { }
+    try { Disconnect-SPOService -ErrorAction SilentlyContinue } catch { }
     try { Disconnect-MicrosoftTeams -ErrorAction SilentlyContinue | Out-Null } catch { }
 }
 
@@ -900,16 +896,16 @@ $ControlRegistry = @(
     [pscustomobject]@{
         Id='SPO-SHARING'; Service='SPO'; Area='SharePoint'; Cis='7.2'; Level=1
         Name='Ogranicz udostępnianie zewnętrzne + wygasanie linków'
-        Test={ $t=Get-PnPTenant; $ok = $t.SharingCapability -in @('Disabled','ExistingExternalUserSharingOnly')
+        Test={ $t=Get-SPOTenant; $ok = $t.SharingCapability -in @('Disabled','ExistingExternalUserSharingOnly')
                New-TestResult $ok ("SharingCapability="+$t.SharingCapability) }
-        Apply={ Set-PnPTenant -SharingCapability ExistingExternalUserSharingOnly -DefaultSharingLinkType Direct `
+        Apply={ Set-SPOTenant -SharingCapability ExistingExternalUserSharingOnly -DefaultSharingLinkType Direct `
                     -DefaultLinkPermission View -RequireAnonymousLinksExpireInDays 30 -PreventExternalUsersFromResharing $true }
     },
     [pscustomobject]@{
         Id='SPO-LEGACYAUTH'; Service='SPO'; Area='SharePoint'; Cis='7.2.x'; Level=1
         Name='Wyłącz legacy auth w SharePoint'
-        Test={ $t=Get-PnPTenant; New-TestResult (-not $t.LegacyAuthProtocolsEnabled) ("LegacyAuth="+$t.LegacyAuthProtocolsEnabled) }
-        Apply={ Set-PnPTenant -LegacyAuthProtocolsEnabled $false }
+        Test={ $t=Get-SPOTenant; New-TestResult (-not $t.LegacyAuthProtocolsEnabled) ("LegacyAuth="+$t.LegacyAuthProtocolsEnabled) }
+        Apply={ Set-SPOTenant -LegacyAuthProtocolsEnabled $false }
     },
 
     #----- MICROSOFT TEAMS -----
