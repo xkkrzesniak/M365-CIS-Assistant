@@ -13,6 +13,7 @@
 $script:LogCallback        = $null
 $script:DeviceCodeCallback = $null   # scriptblock: param($Url, $Code) -> zwraca scriptblock do zamkniecia okna
 $script:ExoModFile         = $null   # pelna sciezka do zaladowanego ExchangeOnlineManagement.psd1
+$script:MsalApp            = $null   # PublicClientApplication - cache miedzy polaczeniami
 function Set-CISLogCallback        { param([scriptblock]$Callback) $script:LogCallback      = $Callback }
 function Set-CISDeviceCodeCallback { param([scriptblock]$Callback) $script:DeviceCodeCallback = $Callback }
 function Write-CISLog {
@@ -215,6 +216,71 @@ function Invoke-CISDeviceConnect {
     if ($authSync.Error) { throw $authSync.Error }
 }
 
+# Logowanie do Graph przez MSAL.NET bezposrednio - omija Connect-MgGraph auth (problemy z WAM/runspace).
+# Uzywamy Microsoft Graph Command Line Tools (publiczny klient MS, delegated, kazdy tenant).
+# AcquireTokenInteractive otwiera przegladarke systemowa (nie WAM, nie embedded browser).
+function Connect-CISGraphInteractive {
+    param([string[]]$Scopes)
+    Write-CISLog 'Logowanie do Microsoft Graph (przeglądarka)...' INFO
+
+    # MSAL.NET jest juz zaladowany przez Microsoft.Graph.Authentication
+    $msalAsm = [System.AppDomain]::CurrentDomain.GetAssemblies() |
+        Where-Object { $_.GetName().Name -eq 'Microsoft.Identity.Client' } |
+        Sort-Object { [version]$_.GetName().Version } -Descending |
+        Select-Object -First 1
+    if (-not $msalAsm) { throw 'Brak Microsoft.Identity.Client - zaimportuj Microsoft.Graph.Authentication.' }
+
+    if (-not $script:MsalApp) {
+        # Publiczny klient Microsoft (Graph Command Line Tools) - nie wymaga rejestracji aplikacji
+        $script:MsalApp = [Microsoft.Identity.Client.PublicClientApplicationBuilder]::Create('14d82eec-204b-4c2f-b7e8-296a70dab67e').
+            WithAuthority('https://login.microsoftonline.com/organizations').
+            WithDefaultRedirectUri().
+            Build()
+    }
+
+    # Sprobuj cicho (token z cache), jesli nie ma - interaktywna przeglądarka
+    $accounts = $script:MsalApp.GetAccountsAsync().GetAwaiter().GetResult()
+    $task = $null
+    if ($accounts) {
+        try {
+            $silentReq = $script:MsalApp.AcquireTokenSilent($Scopes, ($accounts | Select-Object -First 1))
+            $task = $silentReq.ExecuteAsync()
+            $task.Wait(5000) | Out-Null
+            if ($task.IsFaulted) { $task = $null }
+        } catch { $task = $null }
+    }
+    if (-not $task -or -not $task.IsCompleted -or $task.IsFaulted) {
+        Write-CISLog 'Otwieram przegladarke do logowania Microsoft 365...' INFO
+        $task = $script:MsalApp.AcquireTokenInteractive($Scopes).ExecuteAsync()
+    }
+
+    # Czekaj na token przez DispatcherFrame (UI pozostaje responsywne)
+    if ([System.Windows.Application]::Current) {
+        $dcFrame   = [System.Windows.Threading.DispatcherFrame]::new()
+        $deadline  = [DateTime]::UtcNow.AddMinutes(10)
+        $dcTimer   = [System.Windows.Threading.DispatcherTimer]::new()
+        $dcTimer.Interval = [TimeSpan]::FromMilliseconds(300)
+        $dcTimer.Add_Tick({
+            if ($task.IsCompleted -or $task.IsFaulted -or $task.IsCanceled -or
+                [DateTime]::UtcNow -gt $deadline) {
+                $dcTimer.Stop(); $dcFrame.Continue = $false
+            }
+        }.GetNewClosure())
+        $dcTimer.Start()
+        [System.Windows.Threading.Dispatcher]::PushFrame($dcFrame)
+    } else {
+        $task.Wait([TimeSpan]::FromMinutes(10)) | Out-Null
+    }
+
+    if ($task.IsFaulted)      { throw $task.Exception.GetBaseException() }
+    if ($task.IsCanceled)     { throw 'Logowanie anulowane.' }
+    if (-not $task.IsCompleted) { throw 'Timeout logowania (10 min).' }
+
+    $secToken = ConvertTo-SecureString $task.Result.AccessToken -AsPlainText -Force
+    Connect-MgGraph -AccessToken $secToken -NoWelcome -ErrorAction Stop
+    Write-CISLog 'Microsoft Graph - polaczono.' OK
+}
+
 # ---------- POLACZENIA ----------
 function Connect-CISServices {
     [CmdletBinding()]
@@ -251,7 +317,6 @@ function Connect-CISServices {
         if (-not (Get-Command 'Connect-MgGraph' -ErrorAction SilentlyContinue)) {
             throw "Connect-MgGraph niedostepne. Zainstaluj recznie:`n  Install-Module Microsoft.Graph.Authentication -Scope CurrentUser -Force"
         }
-        Write-CISLog 'Lacze z Microsoft Graph (kod urzadzenia)...'
         $mgScopes = @(
             'Policy.ReadWrite.ConditionalAccess','Policy.Read.All','Application.Read.All',
             'Policy.ReadWrite.Authorization','Policy.ReadWrite.AuthenticationMethod',
@@ -260,22 +325,7 @@ function Connect-CISServices {
             'DeviceManagementConfiguration.ReadWrite.All','DeviceManagementServiceConfig.ReadWrite.All',
             'DeviceManagementManagedDevices.Read.All'
         )
-        $scopesJoined = $mgScopes -join '|'
-        try {
-            Invoke-CISDeviceConnect -ServiceName 'Microsoft Graph' -ConnectInvoke @"
-Import-Module Microsoft.Graph.Authentication -Force -ErrorAction SilentlyContinue
-`$s = '$scopesJoined' -split '\|'
-Connect-MgGraph -NoWelcome -UseDeviceAuthentication -Scopes `$s -ErrorAction Stop
-"@
-        } catch {
-            Write-CISLog "Runspace Graph: $($_.Exception.Message)" WARN
-        }
-        # Runspace wykonuje auth w oddzielnej sesji PS - upewnij sie ze glowna sesja jest polaczona.
-        # Po auth w runspace MSAL cachuje token; Connect-MgGraph bez device code uzyje go cicho.
-        if (-not (Get-MgContext -ErrorAction SilentlyContinue)) {
-            Write-CISLog 'Lacze Graph w glownej sesji (token z MSAL cache)...' INFO
-            Connect-MgGraph -NoWelcome -UseDeviceAuthentication -Scopes $mgScopes -ErrorAction Stop
-        }
+        Connect-CISGraphInteractive -Scopes $mgScopes
         $script:Ctx.Connected.Graph = $true
         $script:Ctx.Connected.Intune = (-not $SkipIntune)
         try {
