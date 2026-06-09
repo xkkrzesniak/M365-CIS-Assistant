@@ -75,12 +75,6 @@ function Invoke-CISDeviceConnect {
         CodeShown=$false; DismissCallback=$null; FallbackWin=$null
     })
 
-    # Przekieruj Console.Out - MSAL (Connect-MgGraph) zapisuje kod przez Console.Write, nie przez Write-Host
-    $consoleSb  = [System.Text.StringBuilder]::new()
-    $captureOut = [System.IO.StringWriter]::new($consoleSb)
-    $origOut    = [Console]::Out
-    [Console]::SetOut($captureOut)
-
     $authRs = [runspacefactory]::CreateRunspace()
     $authRs.Open()
     $authRs.SessionStateProxy.SetVariable('authSync',       $authSync)
@@ -108,11 +102,9 @@ function Invoke-CISDeviceConnect {
         catch { $authSync.Error = $_.Exception.Message }
         finally { $authSync.Done = $true }
     })
-    # Odbierz takze strumien Output (Connect-MgGraph moze tam pisac przez WriteObject)
-    $outCol     = [System.Management.Automation.PSDataCollection[PSObject]]::new()
-    $authHandle = $authPs.BeginInvoke([System.Management.Automation.PSDataCollection[PSObject]]::new(), $outCol)
+    $authHandle = $authPs.BeginInvoke()
 
-    # Pomocnik skanujacy wszystkie zrodla wyjscia w poszukiwaniu kodu urzadzenia
+    # Pomocnik skanujacy Information i Warning streamy w poszukiwaniu kodu urzadzenia
     $scanSources = {
         foreach ($item in @($authPs.Streams.Information)) {
             $msg = [string]$item.MessageData
@@ -124,14 +116,6 @@ function Invoke-CISDeviceConnect {
             if ($msg -match '(https://[^\s]+devicelogin[^\s]*)') { $authSync.Url  = $Matches[1].TrimEnd('.') }
             if ($msg -match '\bcode\s+([A-Z0-9]{7,12})\b')       { $authSync.Code = $Matches[1] }
         }
-        foreach ($item in @($outCol)) {
-            $msg = [string]$item
-            if ($msg -match '(https://[^\s]+devicelogin[^\s]*)') { $authSync.Url  = $Matches[1].TrimEnd('.') }
-            if ($msg -match '\bcode\s+([A-Z0-9]{7,12})\b')       { $authSync.Code = $Matches[1] }
-        }
-        $captured = $consoleSb.ToString()
-        if ($captured -match '(https://[^\s]+devicelogin[^\s]*)') { $authSync.Url  = $Matches[1].TrimEnd('.') }
-        if ($captured -match '\bcode\s+([A-Z0-9]{7,12})\b')       { $authSync.Code = $Matches[1] }
     }
 
     if ([System.Windows.Application]::Current) {
@@ -159,9 +143,9 @@ function Invoke-CISDeviceConnect {
                 }
             }
 
-            # Po 10s bez kodu - pokaz okno z URL i instrukcja (zamknie sie samo po auth)
+            # Po 5s bez kodu - pokaz okno z URL i instrukcja (zamknie sie samo po auth)
             if (-not $authSync.CodeShown -and -not $authSync.Done -and
-                ([DateTime]::UtcNow - $startTime).TotalSeconds -gt 10 -and
+                ([DateTime]::UtcNow - $startTime).TotalSeconds -gt 5 -and
                 -not $authSync.FallbackWin) {
                 $fbXaml = @"
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
@@ -225,7 +209,6 @@ function Invoke-CISDeviceConnect {
         }
     }
 
-    try { [Console]::SetOut($origOut) } catch {}
     if ($authSync.DismissCallback) { & $authSync.DismissCallback }
     try { $authPs.EndInvoke($authHandle) } catch {}
     $authPs.Dispose(); $authRs.Close()
@@ -278,11 +261,21 @@ function Connect-CISServices {
             'DeviceManagementManagedDevices.Read.All'
         )
         $scopesJoined = $mgScopes -join '|'
-        Invoke-CISDeviceConnect -ServiceName 'Microsoft Graph' -ConnectInvoke @"
+        try {
+            Invoke-CISDeviceConnect -ServiceName 'Microsoft Graph' -ConnectInvoke @"
 Import-Module Microsoft.Graph.Authentication -Force -ErrorAction SilentlyContinue
 `$s = '$scopesJoined' -split '\|'
 Connect-MgGraph -NoWelcome -UseDeviceAuthentication -Scopes `$s -ErrorAction Stop
 "@
+        } catch {
+            Write-CISLog "Runspace Graph: $($_.Exception.Message)" WARN
+        }
+        # Runspace wykonuje auth w oddzielnej sesji PS - upewnij sie ze glowna sesja jest polaczona.
+        # Po auth w runspace MSAL cachuje token; Connect-MgGraph bez device code uzyje go cicho.
+        if (-not (Get-MgContext -ErrorAction SilentlyContinue)) {
+            Write-CISLog 'Lacze Graph w glownej sesji (token z MSAL cache)...' INFO
+            Connect-MgGraph -NoWelcome -UseDeviceAuthentication -Scopes $mgScopes -ErrorAction Stop
+        }
         $script:Ctx.Connected.Graph = $true
         $script:Ctx.Connected.Intune = (-not $SkipIntune)
         try {
