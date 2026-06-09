@@ -504,8 +504,14 @@ $ctrl.btnScan.Add_Click({
         Update-View
         $ctrl.btnApply.IsEnabled = $true
         $ctrl.btnReport.IsEnabled = $true
-        $n = @($script:AllRows | Where-Object Status -eq 'NIEZGODNE').Count
-        Set-Status ("Skan zakonczony: {0} kontrolek, {1} niezgodnych." -f $script:AllRows.Count, $n)
+        $total   = $script:AllRows.Count
+        $ok      = @($script:AllRows | Where-Object Status -eq 'OK').Count
+        $nok     = @($script:AllRows | Where-Object Status -eq 'NIEZGODNE').Count
+        $warn    = @($script:AllRows | Where-Object Status -eq 'WARN').Count
+        $pct     = if ($total -gt 0) { [int]([math]::Round($ok / $total * 100)) } else { 0 }
+        $scoreColor = if ($pct -ge 80) { '#27ae60' } elseif ($pct -ge 50) { '#e67e22' } else { '#c0392b' }
+        $ctrl.lblStatus.Foreground = $scoreColor
+        Set-Status ("Zgodnosc CIS: {0}% ({1}/{2} OK) | Niezgodne: {3} | Ostrzezenia: {4}" -f $pct,$ok,$total,$nok,$warn)
     } catch {
         [System.Windows.MessageBox]::Show($_.Exception.Message,'Blad skanu','OK','Error') | Out-Null
         Set-Status 'Blad skanu.'

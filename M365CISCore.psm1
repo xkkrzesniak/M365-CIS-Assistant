@@ -608,6 +608,14 @@ $script:ControlDocs = @{
     'TEAMS-EXTERNAL'             = 'Zablokowano połączenia z publicznymi użytkownikami Skype w Teams (AllowPublicUsers = false).'
     'TEAMS-GUESTCALL'            = 'Wyłączono prywatne połączenia głosowe dla gości w Teams (AllowPrivateCalling = false).'
     'TEAMS-RECORDING'            = 'Wyłączono nagrywanie spotkań Teams (AllowCloudRecording = false). Zalecenie CIS L2 - rozważ, czy organizacja nie wymaga nagrywania.'
+    'TEAMS-EXTCONTROL'           = 'Zablokowano zewnętrznym uczestnikom możliwość przejmowania/oddawania kontroli nad ekranem (AllowExternalParticipantGiveRequestControl = false).'
+    'TEAMS-MEETINGCHAT'          = 'Czat podczas spotkań Teams dostępny tylko dla uwierzytelnionych uczestników - anonimowi użytkownicy wykluczeni (AllowMeetingChat = EnabledExceptAnonymous).'
+    'ENTRA-BREAKGLASS'           = 'Audyt konta break-glass: weryfikacja czy ma zarejestrowane silne metody MFA (FIDO2/Passkey). Kontrolka tylko do odczytu - wymaga ręcznej konfiguracji.'
+    'EXO-SMTPAUTH'               = 'Wyłączono SMTP AUTH globalnie (SmtpClientAuthenticationDisabled = true). Blokuje starsze klienty używające Basic Auth do wysyłania poczty - wymagany Modern Auth / OAuth.'
+    'EXO-CALENDAR'               = 'Ograniczono zewnętrzne udostępnianie kalendarza do podstawowych informacji o dostępności (FreeBusySimple). Szczegóły spotkań nie są widoczne dla zewnętrznych.'
+    'EXO-MAILTIPS'               = 'Włączono MailTips - ostrzeżenia wyświetlane w Outlooku przy wysyłaniu do dużych grup, zewnętrznych odbiorców i adresatów bez dostępu.'
+    'SPO-UNMANAGED'              = 'Dostęp do SharePoint/OneDrive z urządzeń niezarządzanych ograniczony do trybu tylko podgląd w przeglądarce (ConditionalAccessPolicy = AllowLimitedAccess).'
+    'SPO-GUESTEXPIRY'            = 'Dostęp gości do SharePoint wygasa po 60 dniach (ExternalUserExpirationRequired = true, ExternalUserExpireInDays = 60). Goście muszą być regularnie ponownie zapraszani.'
     'EXO-AUDIT'                  = 'Włączono Unified Audit Log (rejestrowanie zdarzeń w całym tenancie).'
     'EXO-MBXAUDIT'              = 'Włączono domyślny audyt skrzynek pocztowych (AuditDisabled = false).'
     'EXO-MODERNAUTH'           = 'Wymuszono Modern Authentication (OAuth2ClientProfileEnabled = true).'
@@ -1050,6 +1058,37 @@ $ControlRegistry = @(
         }
     },
 
+    [pscustomobject]@{
+        Id='EXO-SMTPAUTH'; Service='EXO'; Area='Exchange'; Cis='6.5.1'; Level=1
+        Name='Wyłącz SMTP AUTH globalnie (legacy protocol)'
+        Test={ $v=(Get-TransportConfig).SmtpClientAuthenticationDisabled; New-TestResult ([bool]$v) "SmtpClientAuthenticationDisabled=$v" }
+        Apply={ Set-TransportConfig -SmtpClientAuthenticationDisabled $true }
+    },
+    [pscustomobject]@{
+        Id='EXO-CALENDAR'; Service='EXO'; Area='Exchange'; Cis='6.3'; Level=1
+        Name='Ogranicz zewnętrzne udostępnianie kalendarza (max: podstawowe info o dostępności)'
+        Test={
+            $p = Get-SharingPolicy | Where-Object { $_.Default } | Select-Object -First 1
+            if (-not $p) { return New-TestResult $true 'Brak domyslnej polityki udostepniania' }
+            $detailed = $p.Domains | Where-Object { $_ -match 'Detail|Reviewer' }
+            New-TestResult ($detailed.Count -eq 0) ("Domeny z detalami: "+($detailed -join '; '))
+        }
+        Apply={
+            $p = Get-SharingPolicy | Where-Object { $_.Default } | Select-Object -First 1
+            if ($p) { Set-SharingPolicy -Identity $p.Identity -Domains @('*:CalendarSharingFreeBusySimple') -ErrorAction Stop }
+        }
+    },
+    [pscustomobject]@{
+        Id='EXO-MAILTIPS'; Service='EXO'; Area='Exchange'; Cis='6.x'; Level=1
+        Name='Włącz MailTips (ostrzeżenia przy wysyłce zewnętrznej)'
+        Test={
+            $c = Get-OrganizationConfig
+            $ok = [bool]$c.MailTipsAllTipsEnabled -and [bool]$c.MailTipsExternalRecipientsTipsEnabled
+            New-TestResult $ok ("AllTips="+$c.MailTipsAllTipsEnabled+"; External="+$c.MailTipsExternalRecipientsTipsEnabled)
+        }
+        Apply={ Set-OrganizationConfig -MailTipsAllTipsEnabled $true -MailTipsExternalRecipientsTipsEnabled $true -MailTipsGroupMetricsEnabled $true -MailTipsLargeAudienceThreshold 25 }
+    },
+
     #----- SHAREPOINT ONLINE / ONEDRIVE -----
     [pscustomobject]@{
         Id='SPO-SHARING'; Service='SPO'; Area='SharePoint'; Cis='7.2'; Level=1
@@ -1064,6 +1103,26 @@ $ControlRegistry = @(
         Name='Wyłącz legacy auth w SharePoint'
         Test={ $t=Get-SPOTenant; New-TestResult (-not $t.LegacyAuthProtocolsEnabled) ("LegacyAuth="+$t.LegacyAuthProtocolsEnabled) }
         Apply={ Set-SPOTenant -LegacyAuthProtocolsEnabled $false }
+    },
+    [pscustomobject]@{
+        Id='SPO-UNMANAGED'; Service='SPO'; Area='SharePoint'; Cis='7.1'; Level=1
+        Name='Ogranicz dostęp z urządzeń niezarządzanych (tylko podgląd w przeglądarce)'
+        Test={
+            $t = Get-SPOTenant
+            $ok = $t.ConditionalAccessPolicy -in @('AllowLimitedAccess','BlockAccess')
+            New-TestResult $ok ("ConditionalAccessPolicy="+$t.ConditionalAccessPolicy)
+        }
+        Apply={ Set-SPOTenant -ConditionalAccessPolicy AllowLimitedAccess }
+    },
+    [pscustomobject]@{
+        Id='SPO-GUESTEXPIRY'; Service='SPO'; Area='SharePoint'; Cis='7.4'; Level=1
+        Name='Wygasanie dostępu gości SharePoint (max 60 dni)'
+        Test={
+            $t = Get-SPOTenant
+            $ok = [bool]$t.ExternalUserExpirationRequired -and ($t.ExternalUserExpireInDays -le 60)
+            New-TestResult $ok ("Required="+$t.ExternalUserExpirationRequired+"; Days="+$t.ExternalUserExpireInDays)
+        }
+        Apply={ Set-SPOTenant -ExternalUserExpirationRequired $true -ExternalUserExpireInDays 60 }
     },
 
     #----- MICROSOFT TEAMS -----
@@ -1107,6 +1166,39 @@ $ControlRegistry = @(
             New-TestResult (-not $p.AllowCloudRecording) ("AllowCloudRecording="+$p.AllowCloudRecording)
         }
         Apply={ Set-CsTeamsMeetingPolicy -Identity Global -AllowCloudRecording $false }
+    },
+    [pscustomobject]@{
+        Id='TEAMS-EXTCONTROL'; Service='Teams'; Area='Teams'; Cis='8.4'; Level=1
+        Name='Zablokuj zewnętrznym przejmowanie kontroli nad ekranem'
+        Test={
+            $p = Get-CsTeamsMeetingPolicy -Identity Global
+            New-TestResult (-not $p.AllowExternalParticipantGiveRequestControl) ("AllowExternalParticipantGiveRequestControl="+$p.AllowExternalParticipantGiveRequestControl)
+        }
+        Apply={ Set-CsTeamsMeetingPolicy -Identity Global -AllowExternalParticipantGiveRequestControl $false }
+    },
+    [pscustomobject]@{
+        Id='TEAMS-MEETINGCHAT'; Service='Teams'; Area='Teams'; Cis='8.1.x'; Level=1
+        Name='Czat na spotkaniach: anonimowi użytkownicy bez dostępu'
+        Test={
+            $p = Get-CsTeamsMeetingPolicy -Identity Global
+            $ok = $p.AllowMeetingChat -in @('EnabledExceptAnonymous','Disabled')
+            New-TestResult $ok ("AllowMeetingChat="+$p.AllowMeetingChat)
+        }
+        Apply={ Set-CsTeamsMeetingPolicy -Identity Global -AllowMeetingChat EnabledExceptAnonymous }
+    },
+    [pscustomobject]@{
+        Id='ENTRA-BREAKGLASS'; Service='Graph'; Area='Entra ID'; Cis='1.4'; Level=1
+        Name='Konto break-glass - weryfikacja metod MFA (audyt)'
+        Test={
+            $bgUpn = $script:Ctx.BreakGlassUpn
+            if (-not $bgUpn) { return New-TestResult $false 'Brak skonfigurowanego konta break-glass w tym sesji' }
+            $bgUser = Get-MgUser -Filter "UserPrincipalName eq '$bgUpn'" -Property Id,DisplayName -ErrorAction SilentlyContinue
+            if (-not $bgUser) { return New-TestResult $false "Konto '$bgUpn' nie istnieje w katalogu" }
+            $methods = Get-MgUserAuthenticationMethod -UserId $bgUser.Id -ErrorAction SilentlyContinue
+            $mfaMethods = $methods | Where-Object { $_.AdditionalProperties['@odata.type'] -notmatch '#microsoft.graph.passwordAuthenticationMethod' }
+            New-TestResult ($mfaMethods.Count -gt 0) ("Konto=$bgUpn; MethodsMFA="+$mfaMethods.Count+"; MethodsTotal="+$methods.Count)
+        }
+        Apply={ Write-CISLog 'ENTRA-BREAKGLASS: tylko audyt - skonfiguruj recznie silne MFA (FIDO2/Passkey) dla konta break-glass.' WARN }
     },
 
     #----- UWIERZYTELNIANIE POCZTY DOMEN (DKIM / DMARC / SPF) -----
