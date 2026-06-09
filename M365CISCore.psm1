@@ -223,18 +223,37 @@ function Connect-CISGraphInteractive {
     param([string[]]$Scopes)
     Write-CISLog 'Logowanie do Microsoft Graph (przeglądarka)...' INFO
 
-    # MSAL.NET jest juz zaladowany przez Microsoft.Graph.Authentication
+    # Upewnij sie ze MSAL.NET jest zaladowany (moze byc lazy-loaded przez Graph modul)
     $msalAsm = [System.AppDomain]::CurrentDomain.GetAssemblies() |
         Where-Object { $_.GetName().Name -eq 'Microsoft.Identity.Client' } |
-        Sort-Object { [version]$_.GetName().Version } -Descending |
         Select-Object -First 1
-    if (-not $msalAsm) { throw 'Brak Microsoft.Identity.Client - zaimportuj Microsoft.Graph.Authentication.' }
+    if (-not $msalAsm) {
+        # Szukaj DLL w katalogach modulow Microsoft.Graph.*
+        $msalDll = Get-Module -Name 'Microsoft.Graph.*' |
+            Select-Object -ExpandProperty ModuleBase -ErrorAction SilentlyContinue |
+            ForEach-Object { Get-ChildItem $_ -Recurse -Filter 'Microsoft.Identity.Client.dll' -ErrorAction SilentlyContinue } |
+            Sort-Object { [version]$_.VersionInfo.FileVersion } -Descending |
+            Select-Object -First 1
+        if (-not $msalDll) {
+            # Szukaj w PSModulePath
+            $msalDll = ($env:PSModulePath -split ';') |
+                ForEach-Object { Get-ChildItem $_ -Recurse -Filter 'Microsoft.Identity.Client.dll' -ErrorAction SilentlyContinue } |
+                Sort-Object { [version]$_.VersionInfo.FileVersion } -Descending |
+                Select-Object -First 1
+        }
+        if ($msalDll) {
+            Add-Type -Path $msalDll.FullName -ErrorAction SilentlyContinue
+        } else {
+            throw 'Nie znaleziono Microsoft.Identity.Client.dll. Zainstaluj Microsoft.Graph: Install-Module Microsoft.Graph -Scope CurrentUser'
+        }
+    }
 
     if (-not $script:MsalApp) {
         # Publiczny klient Microsoft (Graph Command Line Tools) - nie wymaga rejestracji aplikacji
+        # http://localhost jako redirect - standardowy dla natywnych aplikacji desktopowych
         $script:MsalApp = [Microsoft.Identity.Client.PublicClientApplicationBuilder]::Create('14d82eec-204b-4c2f-b7e8-296a70dab67e').
             WithAuthority('https://login.microsoftonline.com/organizations').
-            WithDefaultRedirectUri().
+            WithRedirectUri('http://localhost').
             Build()
     }
 
@@ -251,7 +270,10 @@ function Connect-CISGraphInteractive {
     }
     if (-not $task -or -not $task.IsCompleted -or $task.IsFaulted) {
         Write-CISLog 'Otwieram przegladarke do logowania Microsoft 365...' INFO
-        $task = $script:MsalApp.AcquireTokenInteractive($Scopes).ExecuteAsync()
+        # WithUseEmbeddedWebView($false) = systemowa przegladarka, bez embedded WebBrowser
+        $task = $script:MsalApp.AcquireTokenInteractive($Scopes).
+            WithUseEmbeddedWebView($false).
+            ExecuteAsync()
     }
 
     # Czekaj na token przez DispatcherFrame (UI pozostaje responsywne)
