@@ -12,7 +12,6 @@
 # ---------- LOGOWANIE ----------
 $script:LogCallback        = $null
 $script:DeviceCodeCallback = $null   # scriptblock: param($Url, $Code) -> zwraca scriptblock do zamkniecia okna
-$script:WamBroken          = $false  # set true when WAM broker fails; all subsequent MSAL services use device code
 $script:ExoModFile         = $null   # pelna sciezka do zaladowanego ExchangeOnlineManagement.psd1
 function Set-CISLogCallback        { param([scriptblock]$Callback) $script:LogCallback      = $Callback }
 function Set-CISDeviceCodeCallback { param([scriptblock]$Callback) $script:DeviceCodeCallback = $Callback }
@@ -63,23 +62,12 @@ function Reset-CISContext {
 }
 function Get-CISContext { if (-not $script:Ctx) { Reset-CISContext | Out-Null }; $script:Ctx }
 
-# ---------- POMOCNICZE WAM ----------
-function Test-WamBrokerError {
-    param($Err)
-    $ex = $Err.Exception
-    while ($ex) {
-        if ($ex -is [System.MissingMethodException] -or $ex.Message -match 'BrokerExtension|WithBroker') { return $true }
-        $ex = $ex.InnerException
-    }
-    return $false
-}
-
 # Uruchamia polecenie uwierzytelnienia w tle (runspace) z przechwytem Write-Host/Write-Warning,
 # wydobywa kod urzadzenia i pokazuje go przez DeviceCodeCallback lub log.
 # $ConnectInvoke - string z poleceniem do Invoke-Expression w runspace.
 function Invoke-CISDeviceConnect {
     param([string]$ServiceName, [string]$ConnectInvoke)
-    Write-CISLog ("$ServiceName - logowanie kodem urzadzenia (WAM broker niedostepny)...") WARN
+    Write-CISLog "$ServiceName - logowanie kodem urzadzenia..." WARN
 
     $authSync = [hashtable]::Synchronized(@{ Done=$false; Error=$null; Code=$null; Url='https://microsoft.com/devicelogin' })
     $authRs   = [runspacefactory]::CreateRunspace()
@@ -217,7 +205,7 @@ function Connect-CISServices {
         if (-not (Get-Command 'Connect-MgGraph' -ErrorAction SilentlyContinue)) {
             throw "Connect-MgGraph niedostepne. Zainstaluj recznie:`n  Install-Module Microsoft.Graph.Authentication -Scope CurrentUser -Force"
         }
-        Write-CISLog 'Lacze z Microsoft Graph...'
+        Write-CISLog 'Lacze z Microsoft Graph (kod urzadzenia)...'
         $mgScopes = @(
             'Policy.ReadWrite.ConditionalAccess','Policy.Read.All','Application.Read.All',
             'Policy.ReadWrite.Authorization','Policy.ReadWrite.AuthenticationMethod',
@@ -226,28 +214,12 @@ function Connect-CISServices {
             'DeviceManagementConfiguration.ReadWrite.All','DeviceManagementServiceConfig.ReadWrite.All',
             'DeviceManagementManagedDevices.Read.All'
         )
-        if ($script:WamBroken) {
-            $scopesJoined = $mgScopes -join '|'
-            Invoke-CISDeviceConnect -ServiceName 'Microsoft Graph' -ConnectInvoke @"
+        $scopesJoined = $mgScopes -join '|'
+        Invoke-CISDeviceConnect -ServiceName 'Microsoft Graph' -ConnectInvoke @"
 Import-Module Microsoft.Graph.Authentication -Force -ErrorAction SilentlyContinue
 `$s = '$scopesJoined' -split '\|'
 Connect-MgGraph -NoWelcome -UseDeviceAuthentication -Scopes `$s -ErrorAction Stop
 "@
-        } else {
-            try {
-                Connect-MgGraph -NoWelcome -Scopes $mgScopes -ErrorAction Stop
-            } catch {
-                if (Test-WamBrokerError $_) {
-                    $script:WamBroken = $true
-                    $scopesJoined = $mgScopes -join '|'
-                    Invoke-CISDeviceConnect -ServiceName 'Microsoft Graph' -ConnectInvoke @"
-Import-Module Microsoft.Graph.Authentication -Force -ErrorAction SilentlyContinue
-`$s = '$scopesJoined' -split '\|'
-Connect-MgGraph -NoWelcome -UseDeviceAuthentication -Scopes `$s -ErrorAction Stop
-"@
-                } else { throw }
-            }
-        }
         $script:Ctx.Connected.Graph = $true
         $script:Ctx.Connected.Intune = (-not $SkipIntune)
         try {
@@ -276,19 +248,8 @@ Connect-MgGraph -NoWelcome -UseDeviceAuthentication -Scopes `$s -ErrorAction Sto
         $exoMod = Get-Module ExchangeOnlineManagement | Sort-Object Version -Descending | Select-Object -First 1
         $script:ExoModFile = $exoMod.Path
         $exoLoad = if ($script:ExoModFile) { "Import-Module '$($script:ExoModFile)' -Force -ErrorAction Stop" } else { "Import-Module ExchangeOnlineManagement -Force -ErrorAction Stop" }
-        Write-CISLog "Lacze z Exchange Online (EXO v$($exoMod.Version))..."
-        if ($script:WamBroken) {
-            Invoke-CISDeviceConnect -ServiceName 'Exchange Online' -ConnectInvoke "$exoLoad -ErrorAction SilentlyContinue`nConnect-ExchangeOnline -ShowBanner:`$false -Device -ErrorAction Stop"
-        } else {
-            try {
-                Connect-ExchangeOnline -ShowBanner:$false -ErrorAction Stop
-            } catch {
-                if (Test-WamBrokerError $_) {
-                    $script:WamBroken = $true
-                    Invoke-CISDeviceConnect -ServiceName 'Exchange Online' -ConnectInvoke "$exoLoad -ErrorAction SilentlyContinue`nConnect-ExchangeOnline -ShowBanner:`$false -Device -ErrorAction Stop"
-                } else { throw }
-            }
-        }
+        Write-CISLog "Lacze z Exchange Online (EXO v$($exoMod.Version), kod urzadzenia)..."
+        Invoke-CISDeviceConnect -ServiceName 'Exchange Online' -ConnectInvoke "$exoLoad`nConnect-ExchangeOnline -ShowBanner:`$false -Device -ErrorAction Stop"
         $script:Ctx.Connected.EXO = $true
         try { Enable-OrganizationCustomization -ErrorAction SilentlyContinue } catch { }
         $script:Ctx.AcceptedDomains = (Get-AcceptedDomain).Name
@@ -304,10 +265,7 @@ Connect-MgGraph -NoWelcome -UseDeviceAuthentication -Scopes `$s -ErrorAction Sto
                 Connect-SPOService -Url "https://$tn-admin.sharepoint.com" -ErrorAction Stop
                 $script:Ctx.Connected.SPO = $true
             } catch {
-                if (Test-WamBrokerError $_) {
-                    $script:WamBroken = $true
-                    Write-CISLog 'Blad WAM SharePoint - polaczenie SPO niemozliwe. Kontrolki SPO beda pominiate.' WARN
-                } else { throw }
+                Write-CISLog "Blad polaczenia SPO: $($_.Exception.Message). Kontrolki SPO beda pominiate." WARN
             }
         }
     }
@@ -316,43 +274,21 @@ Connect-MgGraph -NoWelcome -UseDeviceAuthentication -Scopes `$s -ErrorAction Sto
         $teamsMod = Get-Module MicrosoftTeams | Sort-Object Version -Descending | Select-Object -First 1
         $teamsModFile = $teamsMod.Path
         $teamsLoad = if ($teamsModFile) { "Import-Module '$teamsModFile' -Force -ErrorAction Stop" } else { "Import-Module MicrosoftTeams -Force -ErrorAction Stop" }
-        Write-CISLog 'Lacze z Microsoft Teams...'
-        if ($script:WamBroken) {
-            Invoke-CISDeviceConnect -ServiceName 'Microsoft Teams' -ConnectInvoke "$teamsLoad -ErrorAction SilentlyContinue`nConnect-MicrosoftTeams -UseDeviceAuthentication -ErrorAction Stop | Out-Null"
-        } else {
-            try {
-                Connect-MicrosoftTeams -ErrorAction Stop | Out-Null
-            } catch {
-                if (Test-WamBrokerError $_) {
-                    $script:WamBroken = $true
-                    Invoke-CISDeviceConnect -ServiceName 'Microsoft Teams' -ConnectInvoke "$teamsLoad -ErrorAction SilentlyContinue`nConnect-MicrosoftTeams -UseDeviceAuthentication -ErrorAction Stop | Out-Null"
-                } else { throw }
-            }
-        }
+        Write-CISLog 'Lacze z Microsoft Teams (kod urzadzenia)...'
+        Invoke-CISDeviceConnect -ServiceName 'Microsoft Teams' -ConnectInvoke "$teamsLoad`nConnect-MicrosoftTeams -UseDeviceAuthentication -ErrorAction Stop | Out-Null"
         $script:Ctx.Connected.Teams = $true
     }
     if (-not $SkipPurview) {
         # ExchangeOnlineManagement dostarcza Connect-IPPSSession (Security & Compliance / Purview)
-        $exoLoaded = Get-Module 'ExchangeOnlineManagement' -ErrorAction SilentlyContinue
-        $exoLoadedVer = if ($exoLoaded) { [version]$exoLoaded.Version } else { $null }
-        if (-not $exoLoaded -or ($exoLoadedVer -and $exoLoadedVer -lt [version]'3.2.0')) {
+        $exoLoaded = Get-Module 'ExchangeOnlineManagement' | Sort-Object Version -Descending | Select-Object -First 1
+        if (-not $exoLoaded -or ([version]$exoLoaded.Version -lt [version]'3.2.0')) {
             Confirm-CISModule 'ExchangeOnlineManagement' -MinVersion '3.2.0'
+            $exoLoaded = Get-Module 'ExchangeOnlineManagement' | Sort-Object Version -Descending | Select-Object -First 1
         }
-        $purviewModFile = if ($script:ExoModFile) { $script:ExoModFile } else { (Get-Module ExchangeOnlineManagement).Path }
-        $purviewLoad = if ($purviewModFile) { "Import-Module '$purviewModFile' -Force" } else { "Import-Module ExchangeOnlineManagement -Force" }
-        Write-CISLog 'Lacze z Microsoft Purview (Security & Compliance Center)...' INFO
-        if ($script:WamBroken) {
-            Invoke-CISDeviceConnect -ServiceName 'Purview' -ConnectInvoke "$purviewLoad -ErrorAction SilentlyContinue`nConnect-IPPSSession -ShowBanner:`$false -Device -ErrorAction Stop"
-        } else {
-            try {
-                Connect-IPPSSession -ShowBanner:$false -ErrorAction Stop
-            } catch {
-                if (Test-WamBrokerError $_) {
-                    $script:WamBroken = $true
-                    Invoke-CISDeviceConnect -ServiceName 'Purview' -ConnectInvoke "$purviewLoad -ErrorAction SilentlyContinue`nConnect-IPPSSession -ShowBanner:`$false -Device -ErrorAction Stop"
-                } else { throw }
-            }
-        }
+        $purviewModFile = if ($script:ExoModFile) { $script:ExoModFile } else { $exoLoaded.Path }
+        $purviewLoad = if ($purviewModFile) { "Import-Module '$purviewModFile' -Force -ErrorAction Stop" } else { "Import-Module ExchangeOnlineManagement -Force -ErrorAction Stop" }
+        Write-CISLog 'Lacze z Microsoft Purview (kod urzadzenia)...' INFO
+        Invoke-CISDeviceConnect -ServiceName 'Purview' -ConnectInvoke "$purviewLoad`nConnect-IPPSSession -ShowBanner:`$false -Device -ErrorAction Stop"
         $script:Ctx.Connected.Purview = $true
     }
     return $script:Ctx
