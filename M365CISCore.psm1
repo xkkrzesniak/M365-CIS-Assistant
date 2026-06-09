@@ -92,14 +92,33 @@ function Connect-CISServices {
             throw "Connect-MgGraph niedostepne. Zainstaluj recznie:`n  Install-Module Microsoft.Graph.Authentication -Scope CurrentUser -Force"
         }
         Write-CISLog 'Lacze z Microsoft Graph...'
-        Connect-MgGraph -NoWelcome -Scopes @(
+        $mgScopes = @(
             'Policy.ReadWrite.ConditionalAccess','Policy.Read.All','Application.Read.All',
             'Policy.ReadWrite.Authorization','Policy.ReadWrite.AuthenticationMethod',
             'Directory.ReadWrite.All','User.Read.All','Domain.ReadWrite.All','RoleManagement.Read.Directory',
             'Organization.Read.All',
             'DeviceManagementConfiguration.ReadWrite.All','DeviceManagementServiceConfig.ReadWrite.All',
             'DeviceManagementManagedDevices.Read.All'
-        ) -ErrorAction Stop
+        )
+        try {
+            Connect-MgGraph -NoWelcome -Scopes $mgScopes -ErrorAction Stop
+        } catch {
+            # Konflikt wersji MSAL/WAM (np. starsza DLL z GAC: BrokerExtension.WithBroker).
+            # Fallback: device code auth - omija brokera calkowicie.
+            if ($_.Exception -is [System.MissingMethodException] -or $_.Exception.Message -match 'BrokerExtension|WithBroker|broker') {
+                Write-CISLog 'Blad brokera WAM (konflikt MSAL) - przelaczam na kod urzadzenia...' WARN
+                # Przekieruj Write-Host do logu GUI, zeby kod urzadzenia byl widoczny
+                function global:Write-Host {
+                    [CmdletBinding()] param([object]$Object,[System.ConsoleColor]$ForegroundColor,[System.ConsoleColor]$BackgroundColor,[switch]$NoNewline)
+                    if ($Object) { Write-CISLog ($Object | Out-String).Trim() INFO }
+                }
+                try {
+                    Connect-MgGraph -NoWelcome -UseDeviceAuthentication -Scopes $mgScopes -ErrorAction Stop
+                } finally {
+                    Remove-Item function:global:Write-Host -ErrorAction SilentlyContinue
+                }
+            } else { throw }
+        }
         $script:Ctx.Connected.Graph = $true
         $script:Ctx.Connected.Intune = (-not $SkipIntune)
         try {
