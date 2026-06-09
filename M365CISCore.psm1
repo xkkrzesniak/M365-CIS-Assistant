@@ -10,8 +10,9 @@
 #>
 
 # ---------- LOGOWANIE ----------
-$script:LogCallback      = $null
+$script:LogCallback        = $null
 $script:DeviceCodeCallback = $null   # scriptblock: param($Url, $Code) -> zwraca scriptblock do zamkniecia okna
+$script:WamBroken          = $false  # set true when WAM broker fails; all subsequent MSAL services use device code
 function Set-CISLogCallback        { param([scriptblock]$Callback) $script:LogCallback      = $Callback }
 function Set-CISDeviceCodeCallback { param([scriptblock]$Callback) $script:DeviceCodeCallback = $Callback }
 function Write-CISLog {
@@ -58,6 +59,87 @@ function Reset-CISContext {
 }
 function Get-CISContext { if (-not $script:Ctx) { Reset-CISContext | Out-Null }; $script:Ctx }
 
+# ---------- POMOCNICZE WAM ----------
+function Test-WamBrokerError {
+    param($Err)
+    $ex = $Err.Exception
+    while ($ex) {
+        if ($ex -is [System.MissingMethodException] -or $ex.Message -match 'BrokerExtension|WithBroker') { return $true }
+        $ex = $ex.InnerException
+    }
+    return $false
+}
+
+# Uruchamia polecenie uwierzytelnienia w tle (runspace) z przechwytem Write-Host/Write-Warning,
+# wydobywa kod urzadzenia i pokazuje go przez DeviceCodeCallback lub log.
+# $ConnectInvoke - string z poleceniem do Invoke-Expression w runspace.
+function Invoke-CISDeviceConnect {
+    param([string]$ServiceName, [string]$ConnectInvoke)
+    Write-CISLog ("$ServiceName - logowanie kodem urzadzenia (WAM broker niedostepny)...") WARN
+    $authSync = [hashtable]::Synchronized(@{ Done=$false; Error=$null; Code=$null; Url='https://microsoft.com/devicelogin' })
+    $authRs = [runspacefactory]::CreateRunspace()
+    $authRs.Open()
+    $authRs.SessionStateProxy.SetVariable('authSync', $authSync)
+    $authRs.SessionStateProxy.SetVariable('_connectInvoke', $ConnectInvoke)
+    $authPs = [powershell]::Create()
+    $authPs.Runspace = $authRs
+    [void]$authPs.AddScript({
+        function Write-Host {
+            param([object]$Object,[switch]$NoNewline,
+                  [System.ConsoleColor]$ForegroundColor,[System.ConsoleColor]$BackgroundColor)
+            $msg = [string]$Object
+            if ($msg -match '(https://[^\s]+devicelogin[^\s]*)') { $authSync.Url = $Matches[1].TrimEnd('.') }
+            if ($msg -match '\bcode\s+([A-Z0-9]{7,12})\b') { $authSync.Code = $Matches[1] }
+        }
+        function Write-Warning {
+            param([object]$Message)
+            $msg = [string]$Message
+            if ($msg -match '(https://[^\s]+devicelogin[^\s]*)') { $authSync.Url = $Matches[1].TrimEnd('.') }
+            if ($msg -match '\bcode\s+([A-Z0-9]{7,12})\b') { $authSync.Code = $Matches[1] }
+        }
+        try { Invoke-Expression $_connectInvoke }
+        catch { $authSync.Error = $_.Exception.Message }
+        finally { $authSync.Done = $true }
+    })
+    $authHandle = $authPs.BeginInvoke()
+    $waited = 0
+    while (-not $authSync.Code -and -not $authSync.Done -and $waited -lt 40) {
+        foreach ($info in $authPs.Streams.Information) {
+            $msg = [string]$info.MessageData
+            if ($msg -match '(https://[^\s]+devicelogin[^\s]*)') { $authSync.Url = $Matches[1].TrimEnd('.') }
+            if ($msg -match '\bcode\s+([A-Z0-9]{7,12})\b') { $authSync.Code = $Matches[1] }
+        }
+        [System.Threading.Thread]::Sleep(500); $waited++
+    }
+    $dismissDialog = $null
+    if ($authSync.Code) {
+        $codeDisplay = ($authSync.Code.ToCharArray() -join ' ')
+        if ($script:DeviceCodeCallback) {
+            $dismissDialog = & $script:DeviceCodeCallback $authSync.Url $codeDisplay
+        } else {
+            Write-CISLog "=== $ServiceName - LOGOWANIE ===" INFO
+            Write-CISLog "Otworz: $($authSync.Url)" INFO
+            Write-CISLog "Kod:    $codeDisplay" INFO
+        }
+    } else {
+        Write-CISLog "$ServiceName - kod nie wykryty; sprawdz okno konsoli." WARN
+    }
+    if ([System.Windows.Application]::Current) {
+        $dcFrame = New-Object System.Windows.Threading.DispatcherFrame
+        $dcTimer = New-Object System.Windows.Threading.DispatcherTimer
+        $dcTimer.Interval = [TimeSpan]::FromMilliseconds(500)
+        $dcTimer.Add_Tick({ if ($authSync.Done) { $dcTimer.Stop(); $dcFrame.Continue = $false } })
+        $dcTimer.Start()
+        [System.Windows.Threading.Dispatcher]::PushFrame($dcFrame)
+    } else {
+        while (-not $authSync.Done) { [System.Threading.Thread]::Sleep(1000) }
+    }
+    if ($dismissDialog) { & $dismissDialog }
+    try { $authPs.EndInvoke($authHandle) } catch { }
+    $authPs.Dispose(); $authRs.Close()
+    if ($authSync.Error) { throw $authSync.Error }
+}
+
 # ---------- POLACZENIA ----------
 function Connect-CISServices {
     [CmdletBinding()]
@@ -103,88 +185,27 @@ function Connect-CISServices {
             'DeviceManagementConfiguration.ReadWrite.All','DeviceManagementServiceConfig.ReadWrite.All',
             'DeviceManagementManagedDevices.Read.All'
         )
-        try {
-            Connect-MgGraph -NoWelcome -Scopes $mgScopes -ErrorAction Stop
-        } catch {
-            # Konflikt wersji MSAL/WAM (starsza DLL z GAC: BrokerExtension.WithBroker).
-            # Fallback: device code w osobnym runspace (omija broker calkowicie).
-            if ($_.Exception -is [System.MissingMethodException] -or $_.Exception.Message -match 'BrokerExtension|WithBroker') {
-                Write-CISLog 'Blad brokera WAM - przelaczam na logowanie z oknem kodu urzadzenia...' WARN
-
-                $authSync = [hashtable]::Synchronized(@{
-                    Done=$false; Error=$null; Code=$null; Url='https://microsoft.com/devicelogin'
-                })
-                $authRs = [runspacefactory]::CreateRunspace()
-                $authRs.Open()
-                $authRs.SessionStateProxy.SetVariable('authSync', $authSync)
-                $authRs.SessionStateProxy.SetVariable('mgScopes', $mgScopes)
-                $authPs = [powershell]::Create()
-                $authPs.Runspace = $authRs
-                [void]$authPs.AddScript({
-                    Import-Module Microsoft.Graph.Authentication -Force -ErrorAction SilentlyContinue
-                    # Przechwyc Write-Host zeby wyciagnac kod urzadzenia
-                    function Write-Host {
-                        param([object]$Object,[switch]$NoNewline,
-                              [System.ConsoleColor]$ForegroundColor,[System.ConsoleColor]$BackgroundColor)
-                        $msg = [string]$Object
-                        if ($msg -match '(https://[^\s]+devicelogin[^\s]*)') {
-                            $authSync.Url = $Matches[1].TrimEnd('.')
-                        }
-                        if ($msg -match '\bcode\s+([A-Z0-9]{7,12})\b') {
-                            $authSync.Code = $Matches[1]
-                        }
-                    }
-                    try {
-                        Connect-MgGraph -NoWelcome -UseDeviceAuthentication -Scopes $mgScopes -ErrorAction Stop
-                    } catch {
-                        $authSync.Error = $_.Exception.Message
-                    } finally {
-                        $authSync.Done = $true
-                    }
-                })
-                $authHandle = $authPs.BeginInvoke()
-
-                # Czekaj na pojawienie sie kodu (max 20s), sprawdzaj tez strumien Information
-                $waited = 0
-                while (-not $authSync.Code -and -not $authSync.Done -and $waited -lt 40) {
-                    foreach ($info in $authPs.Streams.Information) {
-                        $msg = [string]$info.MessageData
-                        if ($msg -match '(https://[^\s]+devicelogin[^\s]*)') { $authSync.Url = $Matches[1].TrimEnd('.') }
-                        if ($msg -match '\bcode\s+([A-Z0-9]{7,12})\b') { $authSync.Code = $Matches[1] }
-                    }
-                    [System.Threading.Thread]::Sleep(500); $waited++
-                }
-
-                # Pokaz okno z kodem przez callback (GUI) lub log (CLI)
-                $dismissDialog = $null
-                if ($authSync.Code) {
-                    $codeDisplay = ($authSync.Code.ToCharArray() -join ' ')
-                    if ($script:DeviceCodeCallback) {
-                        $dismissDialog = & $script:DeviceCodeCallback $authSync.Url $codeDisplay
-                    } else {
-                        Write-CISLog ("=== LOGOWANIE KODEM ===" ) INFO
-                        Write-CISLog ("Otworz: $($authSync.Url)") INFO
-                        Write-CISLog ("Kod:    $codeDisplay") INFO
-                    }
-                }
-
-                # Czekaj na zakonczenie auth - DispatcherFrame zachowuje responsywnosc WPF
-                if ([System.Windows.Application]::Current) {
-                    $dcFrame = New-Object System.Windows.Threading.DispatcherFrame
-                    $dcTimer = New-Object System.Windows.Threading.DispatcherTimer
-                    $dcTimer.Interval = [TimeSpan]::FromMilliseconds(500)
-                    $dcTimer.Add_Tick({ if ($authSync.Done) { $dcTimer.Stop(); $dcFrame.Continue = $false } })
-                    $dcTimer.Start()
-                    [System.Windows.Threading.Dispatcher]::PushFrame($dcFrame)
-                } else {
-                    while (-not $authSync.Done) { [System.Threading.Thread]::Sleep(1000) }
-                }
-
-                if ($dismissDialog) { & $dismissDialog }
-                try { $authPs.EndInvoke($authHandle) } catch { }
-                $authPs.Dispose(); $authRs.Close()
-                if ($authSync.Error) { throw $authSync.Error }
-            } else { throw }
+        if ($script:WamBroken) {
+            $scopesJoined = $mgScopes -join '|'
+            Invoke-CISDeviceConnect -ServiceName 'Microsoft Graph' -ConnectInvoke @"
+Import-Module Microsoft.Graph.Authentication -Force -ErrorAction SilentlyContinue
+`$s = '$scopesJoined' -split '\|'
+Connect-MgGraph -NoWelcome -UseDeviceAuthentication -Scopes `$s -ErrorAction Stop
+"@
+        } else {
+            try {
+                Connect-MgGraph -NoWelcome -Scopes $mgScopes -ErrorAction Stop
+            } catch {
+                if (Test-WamBrokerError $_) {
+                    $script:WamBroken = $true
+                    $scopesJoined = $mgScopes -join '|'
+                    Invoke-CISDeviceConnect -ServiceName 'Microsoft Graph' -ConnectInvoke @"
+Import-Module Microsoft.Graph.Authentication -Force -ErrorAction SilentlyContinue
+`$s = '$scopesJoined' -split '\|'
+Connect-MgGraph -NoWelcome -UseDeviceAuthentication -Scopes `$s -ErrorAction Stop
+"@
+                } else { throw }
+            }
         }
         $script:Ctx.Connected.Graph = $true
         $script:Ctx.Connected.Intune = (-not $SkipIntune)
@@ -205,7 +226,24 @@ function Connect-CISServices {
     if (-not $SkipExchange) {
         Confirm-CISModule 'ExchangeOnlineManagement'
         Write-CISLog 'Lacze z Exchange Online...'
-        Connect-ExchangeOnline -ShowBanner:$false -ErrorAction Stop
+        if ($script:WamBroken) {
+            Invoke-CISDeviceConnect -ServiceName 'Exchange Online' -ConnectInvoke @'
+Import-Module ExchangeOnlineManagement -Force -ErrorAction SilentlyContinue
+Connect-ExchangeOnline -ShowBanner:$false -Device -ErrorAction Stop
+'@
+        } else {
+            try {
+                Connect-ExchangeOnline -ShowBanner:$false -ErrorAction Stop
+            } catch {
+                if (Test-WamBrokerError $_) {
+                    $script:WamBroken = $true
+                    Invoke-CISDeviceConnect -ServiceName 'Exchange Online' -ConnectInvoke @'
+Import-Module ExchangeOnlineManagement -Force -ErrorAction SilentlyContinue
+Connect-ExchangeOnline -ShowBanner:$false -Device -ErrorAction Stop
+'@
+                } else { throw }
+            }
+        }
         $script:Ctx.Connected.EXO = $true
         try { Enable-OrganizationCustomization -ErrorAction SilentlyContinue } catch { }
         $script:Ctx.AcceptedDomains = (Get-AcceptedDomain).Name
@@ -217,21 +255,62 @@ function Connect-CISServices {
         else {
             Confirm-CISModule 'Microsoft.Online.SharePoint.PowerShell'
             Write-CISLog ("Lacze z SharePoint Admin (https://{0}-admin.sharepoint.com)..." -f $tn)
-            Connect-SPOService -Url "https://$tn-admin.sharepoint.com" -ErrorAction Stop
-            $script:Ctx.Connected.SPO = $true
+            try {
+                Connect-SPOService -Url "https://$tn-admin.sharepoint.com" -ErrorAction Stop
+                $script:Ctx.Connected.SPO = $true
+            } catch {
+                if (Test-WamBrokerError $_) {
+                    $script:WamBroken = $true
+                    Write-CISLog 'Blad WAM SharePoint - polaczenie SPO niemozliwe. Kontrolki SPO beda pominiate.' WARN
+                } else { throw }
+            }
         }
     }
     if (-not $SkipTeams) {
         Confirm-CISModule 'MicrosoftTeams'
         Write-CISLog 'Lacze z Microsoft Teams...'
-        Connect-MicrosoftTeams -ErrorAction Stop | Out-Null
+        if ($script:WamBroken) {
+            Invoke-CISDeviceConnect -ServiceName 'Microsoft Teams' -ConnectInvoke @'
+Import-Module MicrosoftTeams -Force -ErrorAction SilentlyContinue
+Connect-MicrosoftTeams -UseDeviceAuthentication -ErrorAction Stop | Out-Null
+'@
+        } else {
+            try {
+                Connect-MicrosoftTeams -ErrorAction Stop | Out-Null
+            } catch {
+                if (Test-WamBrokerError $_) {
+                    $script:WamBroken = $true
+                    Invoke-CISDeviceConnect -ServiceName 'Microsoft Teams' -ConnectInvoke @'
+Import-Module MicrosoftTeams -Force -ErrorAction SilentlyContinue
+Connect-MicrosoftTeams -UseDeviceAuthentication -ErrorAction Stop | Out-Null
+'@
+                } else { throw }
+            }
+        }
         $script:Ctx.Connected.Teams = $true
     }
     if (-not $SkipPurview) {
         # ExchangeOnlineManagement dostarcza Connect-IPPSSession (Security & Compliance / Purview)
         if (-not (Get-Module 'ExchangeOnlineManagement')) { Confirm-CISModule 'ExchangeOnlineManagement' }
         Write-CISLog 'Lacze z Microsoft Purview (Security & Compliance Center)...' INFO
-        Connect-IPPSSession -ShowBanner:$false -ErrorAction Stop
+        if ($script:WamBroken) {
+            Invoke-CISDeviceConnect -ServiceName 'Purview' -ConnectInvoke @'
+Import-Module ExchangeOnlineManagement -Force -ErrorAction SilentlyContinue
+Connect-IPPSSession -ShowBanner:$false -Device -ErrorAction Stop
+'@
+        } else {
+            try {
+                Connect-IPPSSession -ShowBanner:$false -ErrorAction Stop
+            } catch {
+                if (Test-WamBrokerError $_) {
+                    $script:WamBroken = $true
+                    Invoke-CISDeviceConnect -ServiceName 'Purview' -ConnectInvoke @'
+Import-Module ExchangeOnlineManagement -Force -ErrorAction SilentlyContinue
+Connect-IPPSSession -ShowBanner:$false -Device -ErrorAction Stop
+'@
+                } else { throw }
+            }
+        }
         $script:Ctx.Connected.Purview = $true
     }
     return $script:Ctx
