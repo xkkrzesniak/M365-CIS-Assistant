@@ -7,12 +7,22 @@ Format: [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 ### Planowane
-- Eksport wyników skanu do CSV (otwieralny w Excelu)
-- Wysyłka raportu HTML przez Microsoft Graph (`Send-MgUserMail`)
 - Porównanie skanów before/after z wykresem trendu
-- Kolorowanie wierszy DataGrid (OK=zielony, NIEZGODNE=czerwony)
 - Zaplanowane skany + Task Scheduler
-- Kontrolki: `MDO-ZAP`, `EXO-FORWARDINGRULES`, `TEAMS-PRESENTER`, `INTUNE-ENCRYPT`, `ENTRA-SMARTLOCKOUT`
+- Kontrolki: `TEAMS-PRESENTER`, `INTUNE-ENCRYPT`, `ENTRA-SMARTLOCKOUT`
+
+---
+
+## [1.0.0] — 2026-06-09
+### Dodano
+- **Kolorowanie wierszy DataGrid** — wiersze tabeli kontrolek kolorowane wg statusu: OK=jasna zieleń (`#e8f5e9`), NIEZGODNE=jasna czerwień (`#ffebee`), WARN=jasny pomarańcz (`#fff8e1`); zaznaczenie (IsSelected) nadpisuje kolory.
+- **2 nowe kontrolki:**
+  - `MDO-ZAP` (CIS 2.1.6, L1): Zero-hour Auto Purge — weryfikuje i włącza ZAP dla spam, phishing i malware w politykach EXO.
+  - `EXO-FORWARDINGRULES` (CIS 6.2.2, L1): audyt zewnętrznych reguł przekazywania poczty (ForwardingSmtpAddress + Inbox Rules); tylko odczyt, wymaga ręcznego przeglądu.
+- **Eksport CSV** (`Export-CISScanToCsv`) — eksportuje wyniki skanu do pliku CSV (separator `;`, UTF-8) z kolumnami ID/Obszar/CIS/Poziom/Kontrolka/Status/Stan/Opis; przycisk „Eksportuj CSV" w GUI.
+- **Raport Word/PDF** (`Export-CISReportToWord`) — generuje raport DOCX (+ opcjonalnie PDF) przez COM Word.Application: strona tytułowa z wynikiem %, podsumowanie wykonawcze, tabela wyników z kolorami statusów i opisami kontrolek; przycisk „Eksportuj Word/PDF" w GUI.
+- **Wysyłka e-mail przez Graph** (`Send-CISReportByEmail`) — wysyła raport (inline HTML lub wygenerowany) przez Microsoft Graph `sendMail`; przycisk „Wyślij e-mail" z InputBox do podania adresata.
+- **GUI**: dodano przyciski `btnExportCsv`, `btnExportWord`, `btnEmail` aktywowane po skanie; załadowanie `Microsoft.VisualBasic` dla InputBox.
 
 ---
 

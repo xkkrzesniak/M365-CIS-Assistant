@@ -640,6 +640,8 @@ $script:ControlDocs = @{
     'PUR-DLP-CLOUD'              = 'Polityka DLP obejmująca SharePoint Online, OneDrive i Teams - wykrywanie i ochrona danych wrażliwych w chmurze.'
     'PUR-SENSITIVITY-LABELS'     = 'Etykiety wrażliwości (Sensitivity Labels) są opublikowane i dostępne dla użytkowników - umożliwiają klasyfikację i ochronę dokumentów oraz e-maili.'
     'PUR-RETENTION'              = 'Polityka retencji obejmuje Exchange, SharePoint i Teams - zapewnia przechowywanie danych przez wymagany okres zgodnie z przepisami.'
+    'MDO-ZAP'                    = 'Zero-hour Auto Purge (ZAP) włączony dla spam, phishing i malware - retro-usuwa złośliwe wiadomości już po dostarczeniu, gdy nowa sygnatura zostanie wykryta.'
+    'EXO-FORWARDINGRULES'        = 'Audyt zewnętrznych reguł przekazywania poczty - wykrywa skrzynki z ForwardingSmtpAddress oraz reguły Inbox Rules kierujące pocztę na zewnętrzne adresy. Wymaga ręcznego przeglądu.'
 }
 
 # ---------- RAPORT HTML ----------
@@ -1329,6 +1331,43 @@ $ControlRegistry = @(
     }
 
 
+    [pscustomobject]@{
+        Id='MDO-ZAP'; Service='EXO'; Area='Defender'; Cis='2.1.6'; Level=1
+        Name='Zero-hour Auto Purge (ZAP) - retro-usuwanie malware i spam'
+        Test={
+            $p = Get-HostedContentFilterPolicy -Identity Default -ErrorAction SilentlyContinue
+            $m = Get-MalwareFilterPolicy -Identity Default -ErrorAction SilentlyContinue
+            $zapSpam   = if ($p)  { [bool]$p.SpamZapEnabled   } else { $false }
+            $zapPhish  = if ($p)  { [bool]$p.PhishZapEnabled  } else { $false }
+            $zapMalw   = if ($m)  { [bool]$m.ZapEnabled       } else { $false }
+            $ok = $zapSpam -and $zapPhish -and $zapMalw
+            New-TestResult $ok ("SpamZAP=$zapSpam; PhishZAP=$zapPhish; MalwareZAP=$zapMalw")
+        }
+        Apply={
+            Set-HostedContentFilterPolicy -Identity Default -SpamZapEnabled $true -PhishZapEnabled $true -ErrorAction SilentlyContinue
+            Set-MalwareFilterPolicy -Identity Default -ZapEnabled $true -ErrorAction SilentlyContinue
+        }
+    },
+    [pscustomobject]@{
+        Id='EXO-FORWARDINGRULES'; Service='EXO'; Area='Exchange'; Cis='6.2.2'; Level=1
+        Name='Audyt: zewnętrzne reguły przekazywania poczty w skrzynkach'
+        Test={
+            $fwdMbx   = @(Get-Mailbox -ResultSize Unlimited -ErrorAction SilentlyContinue |
+                Where-Object { $_.ForwardingSmtpAddress -or ($_.ForwardingAddress -and $_.DeliverToMailboxAndForward) })
+            $fwdRules = @(Get-InboxRule -Mailbox * -ErrorAction SilentlyContinue 2>$null |
+                Where-Object { $_.ForwardTo -or $_.RedirectTo } |
+                Where-Object { ($_.ForwardTo + $_.RedirectTo) -match '@' -and ($_.ForwardTo + $_.RedirectTo) -notmatch 'EX:' })
+            $total = $fwdMbx.Count + $fwdRules.Count
+            if ($total -eq 0) {
+                New-TestResult $true 'Brak zewnetrznych regul przekazywania'
+            } else {
+                $detail = ($fwdMbx | ForEach-Object { $_.UserPrincipalName }) -join ', '
+                New-TestResult $false ("Skrzynki z forwarding: $($fwdMbx.Count); Reguly: $($fwdRules.Count). $detail")
+            }
+        }
+        Apply={ Write-CISLog 'EXO-FORWARDINGRULES: tylko audyt - przejrzyj wyniki i ręcznie usuń niepotrzebne reguły.' WARN }
+    },
+
     #----- MICROSOFT PURVIEW (Security & Compliance) -----
     [pscustomobject]@{
         Id='PUR-DLP-EXCHANGE'; Service='Purview'; Area='Purview'; Cis='3.3.x'; Level=1
@@ -1413,6 +1452,250 @@ $ControlRegistry = @(
 
 
 # ---------- EKSPORT ----------
+function Export-CISScanToCsv {
+    param(
+        [Parameter(Mandatory)][object[]]$Scan,
+        [Parameter(Mandatory)][string]$Path
+    )
+    $rows = $Scan | ForEach-Object {
+        $doc = $script:ControlDocs[$_.Id]; if (-not $doc) { $doc = '' }
+        [pscustomobject]@{
+            ID          = $_.Id
+            Obszar      = $_.Obszar
+            CIS         = $_.CIS
+            Poziom      = $_.Poziom
+            Kontrolka   = $_.Kontrolka
+            Status      = $_.Status
+            Stan        = $_.Aktualnie
+            Opis        = $doc
+        }
+    }
+    $rows | Export-Csv -Path $Path -Encoding UTF8 -NoTypeInformation -Delimiter ';'
+    Write-CISLog "Eksport CSV: $Path ($(($rows).Count) wierszy)" OK
+}
+
+function Export-CISReportToWord {
+    param(
+        [Parameter(Mandatory)][object[]]$Scan,
+        [object[]]$Applied,
+        [hashtable]$Context,
+        [Parameter(Mandatory)][string]$Path,
+        [switch]$SaveAsPdf
+    )
+    try { $word = New-Object -ComObject Word.Application -ErrorAction Stop }
+    catch { throw 'Microsoft Word nie jest zainstalowany. Zainstaluj Word lub użyj eksportu HTML.' }
+
+    $word.Visible = $false
+    $wordDoc = $word.Documents.Add()
+    $sel = $word.Selection
+
+    # --- Styl nagłówka dokumentu ---
+    $wordDoc.BuiltInDocumentProperties("Title")  = 'Raport zgodności CIS M365'
+    $wordDoc.BuiltInDocumentProperties("Author") = try { (Get-MgContext).Account } catch { $env:USERNAME }
+
+    $tenant  = if ($Context.TenantDisplayName) { $Context.TenantDisplayName } else { $Context.TenantInitialDomain }
+    $domain  = $Context.TenantInitialDomain
+    $now     = Get-Date -Format 'yyyy-MM-dd HH:mm'
+    $operator = try { (Get-MgContext).Account } catch { $env:USERNAME }
+
+    $total = $Scan.Count
+    $ok    = @($Scan | Where-Object Status -eq 'OK').Count
+    $nok   = @($Scan | Where-Object Status -eq 'NIEZGODNE').Count
+    $warn  = @($Scan | Where-Object Status -eq 'WARN').Count
+    $pct   = if ($total -gt 0) { [int]([math]::Round($ok / $total * 100)) } else { 0 }
+
+    # Kolory Word (RGB jako long int)
+    $colorBlue   = 0x0B5CAB   # niebieski nagłówek
+    $colorGreen  = 0x1A7F37   # zielony OK
+    $colorRed    = 0xB42318   # czerwony NIEZGODNE
+    $colorOrange = 0x9A6700   # pomarańczowy WARN
+    $colorGray   = 0x555555
+
+    # === STRONA TYTUŁOWA ===
+    $sel.ParagraphFormat.Alignment = 1  # wyśrodkuj
+    $sel.Font.Size  = 28; $sel.Font.Bold = $true; $sel.Font.Color = $colorBlue
+    $sel.TypeText("Raport zgodności M365")
+    $sel.TypeParagraph()
+    $sel.Font.Size  = 20; $sel.Font.Color = $colorBlue
+    $sel.TypeText("CIS Microsoft 365 Foundations Benchmark v6.x")
+    $sel.TypeParagraph(); $sel.TypeParagraph()
+    $sel.Font.Size  = 14; $sel.Font.Bold = $false; $sel.Font.Color = $colorGray
+    $sel.TypeText("Klient: $tenant")
+    $sel.TypeParagraph()
+    $sel.TypeText("Domena: $domain")
+    $sel.TypeParagraph()
+    $sel.TypeText("Data: $now")
+    $sel.TypeParagraph()
+    $sel.TypeText("Wykonał: $operator")
+    $sel.TypeParagraph(); $sel.TypeParagraph()
+
+    # Wynik procentowy na stronie tytułowej
+    $scoreColor = if ($pct -ge 80) { $colorGreen } elseif ($pct -ge 50) { $colorOrange } else { $colorRed }
+    $sel.Font.Size = 48; $sel.Font.Bold = $true; $sel.Font.Color = $scoreColor
+    $sel.TypeText("$pct%")
+    $sel.TypeParagraph()
+    $sel.Font.Size = 14; $sel.Font.Bold = $false; $sel.Font.Color = $colorGray
+    $sel.TypeText("Zgodnosc CIS: $ok / $total kontrolek OK")
+    $sel.TypeParagraph()
+
+    # Nowa strona
+    $sel.InsertBreak(7)  # wdPageBreak
+    $sel.ParagraphFormat.Alignment = 0  # do lewej
+
+    # === PODSUMOWANIE ===
+    $sel.Font.Size = 16; $sel.Font.Bold = $true; $sel.Font.Color = $colorBlue
+    $sel.TypeText("1. Podsumowanie wykonawcze")
+    $sel.TypeParagraph()
+    $sel.Font.Size = 11; $sel.Font.Bold = $false; $sel.Font.Color = 0x000000
+    $sel.TypeText("Tenant: $tenant ($domain)")
+    $sel.TypeParagraph()
+    $sel.TypeText("Data skanu: $now | Wykonał: $operator")
+    $sel.TypeParagraph()
+    $sel.TypeText("Benchmark: CIS Microsoft 365 Foundations Benchmark v6.x (L1/L2)")
+    $sel.TypeParagraph(); $sel.TypeParagraph()
+
+    $sel.Font.Color = $colorGreen;  $sel.TypeText("OK (zgodne):      $ok")
+    $sel.TypeParagraph()
+    $sel.Font.Color = $colorRed;    $sel.TypeText("NIEZGODNE:        $nok")
+    $sel.TypeParagraph()
+    $sel.Font.Color = $colorOrange; $sel.TypeText("WARN (ostrzezenia): $warn")
+    $sel.TypeParagraph()
+    $sel.Font.Color = 0x000000;     $sel.TypeText("Lacznie kontrolek: $total")
+    $sel.TypeParagraph()
+    $sel.Font.Color = $scoreColor;  $sel.Font.Bold = $true
+    $sel.TypeText("Wynik zgodnosci: $pct%")
+    $sel.Font.Bold = $false; $sel.Font.Color = 0x000000
+    $sel.TypeParagraph(); $sel.TypeParagraph()
+
+    if ($Applied -and $Applied.Count -gt 0) {
+        $appliedOk = @($Applied | Where-Object Status -eq 'APPLIED').Count
+        $appliedErr = @($Applied | Where-Object Status -eq 'ERROR').Count
+        $sel.TypeText("W tej sesji wdrozono $($Applied.Count) kontrolek (OK: $appliedOk, Bledy: $appliedErr).")
+        $sel.TypeParagraph(); $sel.TypeParagraph()
+    }
+
+    # Nowa strona
+    $sel.InsertBreak(7)
+
+    # === TABELA WYNIKOW ===
+    $sel.Font.Size = 16; $sel.Font.Bold = $true; $sel.Font.Color = $colorBlue
+    $sel.TypeText("2. Szczegolowe wyniki kontrolek")
+    $sel.TypeParagraph(); $sel.Font.Bold = $false; $sel.Font.Size = 11; $sel.Font.Color = 0x000000
+
+    $tbl = $wordDoc.Tables.Add($sel.Range, $total + 1, 5)
+    $tbl.Style = "Table Grid"
+    $tbl.Borders.Enable = $true
+
+    # Nagłówek tabeli
+    $headers = @('Obszar', 'CIS', 'Kontrolka', 'Status', 'Stan zastany')
+    for ($c = 1; $c -le 5; $c++) {
+        $cell = $tbl.Cell(1, $c)
+        $cell.Range.Text = $headers[$c - 1]
+        $cell.Range.Font.Bold = $true
+        $cell.Range.Font.Color = 0xFFFFFF
+        $cell.Shading.BackgroundPatternColor = $colorBlue
+    }
+    # Szerokości kolumn (cm → points: *28.35)
+    $tbl.Columns(1).Width = 2.8 * 28.35  # Obszar
+    $tbl.Columns(2).Width = 1.6 * 28.35  # CIS
+    $tbl.Columns(3).Width = 7.0 * 28.35  # Kontrolka
+    $tbl.Columns(4).Width = 2.2 * 28.35  # Status
+    $tbl.Columns(5).Width = 5.0 * 28.35  # Stan
+
+    for ($i = 0; $i -lt $Scan.Count; $i++) {
+        $row  = $Scan[$i]
+        $r    = $i + 2
+        $ctrlDoc = $script:ControlDocs[$row.Id]
+        $name = if ($ctrlDoc) { "$($row.Kontrolka)`n$ctrlDoc" } else { $row.Kontrolka }
+
+        $tbl.Cell($r, 1).Range.Text = $row.Obszar
+        $tbl.Cell($r, 2).Range.Text = $row.CIS
+        $tbl.Cell($r, 3).Range.Text = $name
+        $tbl.Cell($r, 4).Range.Text = $row.Status
+        $tbl.Cell($r, 5).Range.Text = $row.Aktualnie
+
+        $statColor = switch ($row.Status) {
+            'OK'        { $colorGreen }
+            'NIEZGODNE' { $colorRed }
+            'WARN'      { $colorOrange }
+            default     { 0x000000 }
+        }
+        $tbl.Cell($r, 4).Range.Font.Color = $statColor
+        $tbl.Cell($r, 4).Range.Font.Bold  = $true
+        $tbl.Cell($r, 3).Range.Font.Size  = 9
+        $tbl.Cell($r, 5).Range.Font.Size  = 9
+
+        # Pastelowe tło wiersza
+        $bgColor = switch ($row.Status) {
+            'OK'        { 0xE8F5E9 }
+            'NIEZGODNE' { 0xFFEBEE }
+            'WARN'      { 0xFFF8E1 }
+            default     { 0xFFFFFF }
+        }
+        for ($c = 1; $c -le 5; $c++) {
+            $tbl.Cell($r, $c).Shading.BackgroundPatternColor = $bgColor
+        }
+    }
+
+    # Przesuń kursor za tabelę
+    $sel.MoveDown(5, 1) | Out-Null  # wdLine
+
+    # Zapisz
+    if ($SaveAsPdf) {
+        $pdfPath = [IO.Path]::ChangeExtension($Path, '.pdf')
+        $wordDoc.SaveAs2([ref]$pdfPath, [ref]17)  # 17 = wdFormatPDF
+        Write-CISLog "Raport PDF: $pdfPath" OK
+    }
+    $wordDoc.SaveAs2([ref]$Path, [ref]16)  # 16 = wdFormatDocx
+    $wordDoc.Close()
+    $word.Quit()
+    [System.Runtime.InteropServices.Marshal]::ReleaseComObject($word) | Out-Null
+    Write-CISLog "Raport Word: $Path" OK
+    return $Path
+}
+
+function Send-CISReportByEmail {
+    param(
+        [Parameter(Mandatory)][string]$To,
+        [Parameter(Mandatory)][object[]]$Scan,
+        [object[]]$Applied,
+        [hashtable]$Context,
+        [string]$HtmlReportPath
+    )
+    $from     = (Get-MgContext).Account
+    $tenant   = if ($Context.TenantDisplayName) { $Context.TenantDisplayName } else { $Context.TenantInitialDomain }
+    $now      = Get-Date -Format 'yyyy-MM-dd HH:mm'
+    $total    = $Scan.Count
+    $ok       = @($Scan | Where-Object Status -eq 'OK').Count
+    $nok      = @($Scan | Where-Object Status -eq 'NIEZGODNE').Count
+    $pct      = if ($total -gt 0) { [int]([math]::Round($ok / $total * 100)) } else { 0 }
+    $subject  = "Raport CIS M365 — $tenant — $now — Zgodnosc: $pct%"
+
+    # Treść e-mail (HTML)
+    $body = if ($HtmlReportPath -and (Test-Path $HtmlReportPath)) {
+        Get-Content $HtmlReportPath -Raw -Encoding UTF8
+    } else {
+        $nok2 = $nok
+        @"
+<h2>Raport zgodności CIS M365 — $tenant</h2>
+<p>Data: $now | Wykonał: $from</p>
+<p>Wynik: <strong>$pct% ($ok/$total OK)</strong> | Niezgodne: $nok2</p>
+<p>Szczegóły: wygeneruj raport HTML lub Word z aplikacji M365 CIS Assistant.</p>
+"@
+    }
+
+    $msgBody = @{
+        message = @{
+            subject = $subject
+            body    = @{ contentType = 'HTML'; content = $body }
+            toRecipients = @(@{ emailAddress = @{ address = $To } })
+        }
+        saveToSentItems = $true
+    }
+    Invoke-MgGraphRequest -Method POST -Uri "https://graph.microsoft.com/v1.0/users/$from/sendMail" -Body $msgBody -ContentType 'application/json' | Out-Null
+    Write-CISLog "E-mail z raportem wyslany do: $To" OK
+}
+
 function Get-CISControlDocs { $script:ControlDocs }
 
 Export-ModuleMember -Function `
@@ -1421,4 +1704,5 @@ Export-ModuleMember -Function `
     Get-CISUsers, Get-CISGlobalAdmins, New-CISBreakGlassAccount, Set-CISBreakGlass, `
     Invoke-CISScan, Invoke-CISApply, Remove-CISLegacyPolicies, `
     Get-CISProfileSelection, Import-CISProfile, Save-CISProfile, `
-    New-DeploymentReport, Get-CISControlRegistry, Get-CISControlDocs
+    New-DeploymentReport, Get-CISControlRegistry, Get-CISControlDocs, `
+    Export-CISScanToCsv, Export-CISReportToWord, Send-CISReportByEmail

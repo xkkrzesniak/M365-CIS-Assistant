@@ -20,6 +20,7 @@ if ([Threading.Thread]::CurrentThread.GetApartmentState() -ne 'STA') {
 }
 
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
+Add-Type -AssemblyName Microsoft.VisualBasic
 
 # Katalog aplikacji - dziala dla .ps1 i dla skompilowanego .exe (ps2exe)
 $script:AppRoot = if ($PSScriptRoot) { $PSScriptRoot }
@@ -383,6 +384,21 @@ $xamlText = @'
     <DataGrid x:Name="grid" Grid.Row="3" Margin="0,8,0,0" AutoGenerateColumns="False" CanUserAddRows="False"
               HeadersVisibility="Column" GridLinesVisibility="Horizontal" RowHeaderWidth="0"
               SelectionMode="Single" Background="White" AlternatingRowBackground="#f4f7fb">
+      <DataGrid.RowStyle>
+        <Style TargetType="DataGridRow">
+          <Style.Triggers>
+            <DataTrigger Binding="{Binding Status}" Value="OK">
+              <Setter Property="Background" Value="#e8f5e9"/>
+            </DataTrigger>
+            <DataTrigger Binding="{Binding Status}" Value="NIEZGODNE">
+              <Setter Property="Background" Value="#ffebee"/>
+            </DataTrigger>
+            <DataTrigger Binding="{Binding Status}" Value="WARN">
+              <Setter Property="Background" Value="#fff8e1"/>
+            </DataTrigger>
+          </Style.Triggers>
+        </Style>
+      </DataGrid.RowStyle>
       <DataGrid.Columns>
         <DataGridCheckBoxColumn Header="Wdroz" Binding="{Binding Selected}" Width="55"/>
         <DataGridTextColumn Header="Status"  Binding="{Binding Status}"    Width="90"  IsReadOnly="True"/>
@@ -400,7 +416,10 @@ $xamlText = @'
         <CheckBox x:Name="chkWhatIf" Content="WhatIf (tylko symulacja)" IsChecked="True" Margin="0,0,16,0" VerticalAlignment="Center"/>
         <Button x:Name="btnScan"   Content="2. Skanuj tenant" Width="150" Height="30" Margin="0,0,8,0" Background="#0b5cab" Foreground="White" FontWeight="Bold"/>
         <Button x:Name="btnApply"  Content="3. Wdroz zaznaczone" Width="170" Height="30" Margin="0,0,8,0" Background="#1a7f37" Foreground="White" FontWeight="Bold" IsEnabled="False"/>
-        <Button x:Name="btnReport" Content="4. Raport HTML" Width="140" Height="30" Margin="0,0,16,0" IsEnabled="False"/>
+        <Button x:Name="btnReport"     Content="4. Raport HTML"     Width="130" Height="30" Margin="0,0,4,0" IsEnabled="False"/>
+        <Button x:Name="btnExportCsv"  Content="Eksportuj CSV"      Width="110" Height="30" Margin="0,0,4,0" IsEnabled="False"/>
+        <Button x:Name="btnExportWord" Content="Eksportuj Word/PDF"  Width="130" Height="30" Margin="0,0,4,0" IsEnabled="False"/>
+        <Button x:Name="btnEmail"      Content="Wyslij e-mail"       Width="110" Height="30" Margin="0,0,16,0" IsEnabled="False"/>
         <TextBlock x:Name="lblStatus" Text="Gotowy." VerticalAlignment="Center" Foreground="#444"/>
       </WrapPanel>
     </Border>
@@ -422,7 +441,7 @@ $win = [Windows.Markup.XamlReader]::Load($reader)
 $ctrl = @{}
 'lblTenant','lblBg','cmbCaState','chkSkipEntra','chkSkipExo','chkSkipSpo','chkSkipTeams','chkSkipIntune','chkSkipPurview',
 'btnConnect','cmbLevel','cmbStatus','txtSearch','cmbProfile','btnApplyProfile','btnSaveProfile','btnSelAll',
-'btnSelNone','grid','chkWhatIf','btnScan','btnApply','btnReport','lblStatus','txtLog' | ForEach-Object {
+'btnSelNone','grid','chkWhatIf','btnScan','btnApply','btnReport','btnExportCsv','btnExportWord','btnEmail','lblStatus','txtLog' | ForEach-Object {
     $ctrl[$_] = $win.FindName($_)
 }
 $ctrl.grid.ItemsSource = $script:View
@@ -503,7 +522,10 @@ $ctrl.btnScan.Add_Click({
         # uzupelnij filtr statusu/obszaru? statusy stale; obszary dynamiczne pomijamy dla prostoty
         Update-View
         $ctrl.btnApply.IsEnabled = $true
-        $ctrl.btnReport.IsEnabled = $true
+        $ctrl.btnReport.IsEnabled     = $true
+        $ctrl.btnExportCsv.IsEnabled  = $true
+        $ctrl.btnExportWord.IsEnabled = $true
+        $ctrl.btnEmail.IsEnabled      = $true
         $total   = $script:AllRows.Count
         $ok      = @($script:AllRows | Where-Object Status -eq 'OK').Count
         $nok     = @($script:AllRows | Where-Object Status -eq 'NIEZGODNE').Count
@@ -553,6 +575,45 @@ $ctrl.btnReport.Add_Click({
             try { Invoke-Item $dlg.FileName } catch { }
         } catch { [System.Windows.MessageBox]::Show($_.Exception.Message,'Blad raportu','OK','Error')|Out-Null }
     }
+})
+
+$ctrl.btnExportCsv.Add_Click({
+    if (-not $script:LastScan) { return }
+    $dlg = New-Object Microsoft.Win32.SaveFileDialog
+    $dlg.Filter = 'CSV|*.csv'; $dlg.FileName = "M365-CIS-Scan-$(Get-Date -Format 'yyyyMMdd-HHmm').csv"
+    if ($dlg.ShowDialog()) {
+        try {
+            Export-CISScanToCsv -Scan $script:LastScan -Path $dlg.FileName
+            Set-Status ("CSV zapisany: {0}" -f $dlg.FileName)
+            try { Invoke-Item $dlg.FileName } catch { }
+        } catch { [System.Windows.MessageBox]::Show($_.Exception.Message,'Blad CSV','OK','Error')|Out-Null }
+    }
+})
+
+$ctrl.btnExportWord.Add_Click({
+    if (-not $script:LastScan) { return }
+    $dlg = New-Object Microsoft.Win32.SaveFileDialog
+    $dlg.Filter = 'Word (docx)|*.docx'; $dlg.FileName = "M365-CIS-Report-$(Get-Date -Format 'yyyyMMdd-HHmm').docx"
+    if ($dlg.ShowDialog()) {
+        try {
+            $win.Cursor = 'Wait'; Set-Status 'Generowanie raportu Word...'
+            Export-CISReportToWord -Scan $script:LastScan -Applied $script:LastApplied -Context (Get-CISContext) -Path $dlg.FileName -SaveAsPdf
+            Set-Status ("Raport Word+PDF: {0}" -f $dlg.FileName)
+            try { Invoke-Item $dlg.FileName } catch { }
+        } catch { [System.Windows.MessageBox]::Show($_.Exception.Message,'Blad Word','OK','Error')|Out-Null } finally { $win.Cursor = 'Arrow' }
+    }
+})
+
+$ctrl.btnEmail.Add_Click({
+    if (-not $script:LastScan) { return }
+    $to = [Microsoft.VisualBasic.Interaction]::InputBox('Podaj adres e-mail odbiorcy raportu:', 'Wyslij raport e-mail', '')
+    if (-not $to -or $to -notmatch '@') { return }
+    try {
+        $win.Cursor = 'Wait'; Set-Status 'Wysylanie e-mail...'
+        $htmlPath = $null
+        Send-CISReportByEmail -To $to -Scan $script:LastScan -Applied $script:LastApplied -Context (Get-CISContext) -HtmlReportPath $htmlPath
+        Set-Status "E-mail wyslany do: $to"
+    } catch { [System.Windows.MessageBox]::Show($_.Exception.Message,'Blad e-mail','OK','Error')|Out-Null } finally { $win.Cursor = 'Arrow' }
 })
 
 $ctrl.btnApplyProfile.Add_Click({
