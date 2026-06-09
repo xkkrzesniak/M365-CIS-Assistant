@@ -95,14 +95,12 @@ function Invoke-CISDeviceConnect {
             param([object]$Object,[switch]$NoNewline,
                   [System.ConsoleColor]$ForegroundColor,[System.ConsoleColor]$BackgroundColor)
             $msg = [string]$Object
-            [Console]::WriteLine($msg)
             if ($msg -match '(https://[^\s]+devicelogin[^\s]*)') { $authSync.Url  = $Matches[1].TrimEnd('.') }
             if ($msg -match '\bcode\s+([A-Z0-9]{7,12})\b')       { $authSync.Code = $Matches[1] }
         }
         function Write-Warning {
             param([object]$Message)
             $msg = [string]$Message
-            [Console]::WriteLine($msg)
             if ($msg -match '(https://[^\s]+devicelogin[^\s]*)') { $authSync.Url  = $Matches[1].TrimEnd('.') }
             if ($msg -match '\bcode\s+([A-Z0-9]{7,12})\b')       { $authSync.Code = $Matches[1] }
         }
@@ -151,7 +149,6 @@ function Invoke-CISDeviceConnect {
             # Kod znaleziony - pokaz okno z kodem
             if ($authSync.Code -and -not $authSync.CodeShown) {
                 $authSync.CodeShown = $true
-                try { [Console]::SetOut($origOut) } catch {}
                 if ($authSync.FallbackWin) { $authSync.FallbackWin.Close(); $authSync.FallbackWin = $null }
                 $codeDisp = ($authSync.Code.ToCharArray() -join ' ')
                 if ($_dcCb) {
@@ -162,11 +159,10 @@ function Invoke-CISDeviceConnect {
                 }
             }
 
-            # Po 30s bez kodu - pokaz okno z URL i instrukcja (zamknie sie samo po auth)
+            # Po 10s bez kodu - pokaz okno z URL i instrukcja (zamknie sie samo po auth)
             if (-not $authSync.CodeShown -and -not $authSync.Done -and
-                ([DateTime]::UtcNow - $startTime).TotalSeconds -gt 30 -and
+                ([DateTime]::UtcNow - $startTime).TotalSeconds -gt 10 -and
                 -not $authSync.FallbackWin) {
-                try { [Console]::SetOut($origOut) } catch {}
                 $fbXaml = @"
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         Title="Logowanie: $_svcName" Width="480" Height="210"
