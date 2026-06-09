@@ -69,102 +69,169 @@ function Invoke-CISDeviceConnect {
     param([string]$ServiceName, [string]$ConnectInvoke)
     Write-CISLog "$ServiceName - logowanie kodem urzadzenia..." WARN
 
-    $authSync = [hashtable]::Synchronized(@{ Done=$false; Error=$null; Code=$null; Url='https://microsoft.com/devicelogin' })
-    $authRs   = [runspacefactory]::CreateRunspace()
+    $authSync = [hashtable]::Synchronized(@{
+        Done=$false; Error=$null; Code=$null
+        Url='https://microsoft.com/devicelogin'
+        CodeShown=$false; DismissCallback=$null; FallbackWin=$null
+    })
+
+    # Przekieruj Console.Out - MSAL (Connect-MgGraph) zapisuje kod przez Console.Write, nie przez Write-Host
+    $consoleSb  = [System.Text.StringBuilder]::new()
+    $captureOut = [System.IO.StringWriter]::new($consoleSb)
+    $origOut    = [Console]::Out
+    [Console]::SetOut($captureOut)
+
+    $authRs = [runspacefactory]::CreateRunspace()
     $authRs.Open()
     $authRs.SessionStateProxy.SetVariable('authSync',       $authSync)
     $authRs.SessionStateProxy.SetVariable('_connectInvoke', $ConnectInvoke)
-    # Propaguj PSModulePath zeby runspace znalazl te same wersje modulow co sesja glowna
     $authRs.SessionStateProxy.SetVariable('_psModulePath',  $env:PSModulePath)
 
     $authPs = [powershell]::Create()
     $authPs.Runspace = $authRs
     [void]$authPs.AddScript({
-        $env:PSModulePath = $_psModulePath   # upewnij sie ze runspace widzi te same moduly
+        $env:PSModulePath = $_psModulePath
         function Write-Host {
             param([object]$Object,[switch]$NoNewline,
                   [System.ConsoleColor]$ForegroundColor,[System.ConsoleColor]$BackgroundColor)
             $msg = [string]$Object
-            if ($msg -match '(https://[^\s]+devicelogin[^\s]*)') { $authSync.Url = $Matches[1].TrimEnd('.') }
+            [Console]::WriteLine($msg)
+            if ($msg -match '(https://[^\s]+devicelogin[^\s]*)') { $authSync.Url  = $Matches[1].TrimEnd('.') }
             if ($msg -match '\bcode\s+([A-Z0-9]{7,12})\b')       { $authSync.Code = $Matches[1] }
         }
         function Write-Warning {
             param([object]$Message)
             $msg = [string]$Message
-            if ($msg -match '(https://[^\s]+devicelogin[^\s]*)') { $authSync.Url = $Matches[1].TrimEnd('.') }
+            [Console]::WriteLine($msg)
+            if ($msg -match '(https://[^\s]+devicelogin[^\s]*)') { $authSync.Url  = $Matches[1].TrimEnd('.') }
             if ($msg -match '\bcode\s+([A-Z0-9]{7,12})\b')       { $authSync.Code = $Matches[1] }
         }
         try   { Invoke-Expression $_connectInvoke }
         catch { $authSync.Error = $_.Exception.Message }
         finally { $authSync.Done = $true }
     })
-    $authHandle = $authPs.BeginInvoke()
+    # Odbierz takze strumien Output (Connect-MgGraph moze tam pisac przez WriteObject)
+    $outCol     = [System.Management.Automation.PSDataCollection[PSObject]]::new()
+    $authHandle = $authPs.BeginInvoke([System.Management.Automation.PSDataCollection[PSObject]]::new(), $outCol)
 
-    # Czekaj na kod (max 20s) - sprawdzaj Information ORAZ Warning (EXO uzywa Warning)
-    $waited = 0
-    while (-not $authSync.Code -and -not $authSync.Done -and $waited -lt 40) {
-        foreach ($item in $authPs.Streams.Information) {
+    # Pomocnik skanujacy wszystkie zrodla wyjscia w poszukiwaniu kodu urzadzenia
+    $scanSources = {
+        foreach ($item in @($authPs.Streams.Information)) {
             $msg = [string]$item.MessageData
-            if ($msg -match '(https://[^\s]+devicelogin[^\s]*)') { $authSync.Url = $Matches[1].TrimEnd('.') }
+            if ($msg -match '(https://[^\s]+devicelogin[^\s]*)') { $authSync.Url  = $Matches[1].TrimEnd('.') }
             if ($msg -match '\bcode\s+([A-Z0-9]{7,12})\b')       { $authSync.Code = $Matches[1] }
         }
-        foreach ($item in $authPs.Streams.Warning) {
+        foreach ($item in @($authPs.Streams.Warning)) {
             $msg = [string]$item.Message
-            if ($msg -match '(https://[^\s]+devicelogin[^\s]*)') { $authSync.Url = $Matches[1].TrimEnd('.') }
+            if ($msg -match '(https://[^\s]+devicelogin[^\s]*)') { $authSync.Url  = $Matches[1].TrimEnd('.') }
             if ($msg -match '\bcode\s+([A-Z0-9]{7,12})\b')       { $authSync.Code = $Matches[1] }
         }
-        [System.Threading.Thread]::Sleep(500); $waited++
+        foreach ($item in @($outCol)) {
+            $msg = [string]$item
+            if ($msg -match '(https://[^\s]+devicelogin[^\s]*)') { $authSync.Url  = $Matches[1].TrimEnd('.') }
+            if ($msg -match '\bcode\s+([A-Z0-9]{7,12})\b')       { $authSync.Code = $Matches[1] }
+        }
+        $captured = $consoleSb.ToString()
+        if ($captured -match '(https://[^\s]+devicelogin[^\s]*)') { $authSync.Url  = $Matches[1].TrimEnd('.') }
+        if ($captured -match '\bcode\s+([A-Z0-9]{7,12})\b')       { $authSync.Code = $Matches[1] }
     }
 
-    # Pokaz kod lub fallback gdy kod nie zostal przechwycony
-    $dismissDialog = $null
-    if ($authSync.Code) {
-        $codeDisplay = ($authSync.Code.ToCharArray() -join ' ')
-        if ($script:DeviceCodeCallback) {
-            $dismissDialog = & $script:DeviceCodeCallback $authSync.Url $codeDisplay
-        } else {
-            Write-CISLog "=== $ServiceName - LOGOWANIE ===" INFO
-            Write-CISLog "Otworz: $($authSync.Url)" INFO
-            Write-CISLog "Kod:    $codeDisplay" INFO
-        }
-    } elseif (-not $authSync.Done) {
-        # Nie przechwycono kodu - poinformuj uzytkownika zeby sprawdzil konsole
-        Write-CISLog "$ServiceName - kod automatycznie nie wykryty. Sprawdz okno konsoli PS." WARN
-        if ([System.Windows.Application]::Current) {
-            [System.Windows.Application]::Current.Dispatcher.Invoke([action]{
-                [System.Windows.MessageBox]::Show(
-                    "Nie udalo sie automatycznie wykryc kodu logowania dla:`n$ServiceName`n`n" +
-                    "W tle (w oknie konsoli PowerShell) powinien byc wyswietlony kod.`n" +
-                    "Otworz: https://microsoft.com/devicelogin i wpisz ten kod,`n" +
-                    "a aplikacja sie automatycznie odblokuje.`n`n" +
-                    "Jesli nie widzisz konsoli - sprawdz pasek zadan.",
-                    "Logowanie: $ServiceName", 'OK', 'Information'
-                ) | Out-Null
-            })
-        }
-    }
-
-    # Czekaj na zakonczenie auth - DispatcherFrame zachowuje responsywnosc WPF (timeout 15 min)
     if ([System.Windows.Application]::Current) {
-        $dcFrame = New-Object System.Windows.Threading.DispatcherFrame
-        $dcTimer = New-Object System.Windows.Threading.DispatcherTimer
+        $dcFrame   = [System.Windows.Threading.DispatcherFrame]::new()
+        $startTime = [DateTime]::UtcNow
+        $deadline  = $startTime.AddMinutes(15)
+        $_svcName  = $ServiceName
+        $_dcCb     = $script:DeviceCodeCallback
+
+        $dcTimer = [System.Windows.Threading.DispatcherTimer]::new()
         $dcTimer.Interval = [TimeSpan]::FromMilliseconds(500)
-        $dcDeadline = [DateTime]::UtcNow.AddMinutes(15)
         $dcTimer.Add_Tick({
-            if ($authSync.Done -or [DateTime]::UtcNow -gt $dcDeadline) {
+            if (-not $authSync.Code) { & $scanSources }
+
+            # Kod znaleziony - pokaz okno z kodem
+            if ($authSync.Code -and -not $authSync.CodeShown) {
+                $authSync.CodeShown = $true
+                try { [Console]::SetOut($origOut) } catch {}
+                if ($authSync.FallbackWin) { $authSync.FallbackWin.Close(); $authSync.FallbackWin = $null }
+                $codeDisp = ($authSync.Code.ToCharArray() -join ' ')
+                if ($_dcCb) {
+                    $authSync.DismissCallback = & $_dcCb $authSync.Url $codeDisp
+                } else {
+                    Write-CISLog "=== $_svcName ===" INFO
+                    Write-CISLog "Otworz: $($authSync.Url)  Kod: $codeDisp" INFO
+                }
+            }
+
+            # Po 30s bez kodu - pokaz okno z URL i instrukcja (zamknie sie samo po auth)
+            if (-not $authSync.CodeShown -and -not $authSync.Done -and
+                ([DateTime]::UtcNow - $startTime).TotalSeconds -gt 30 -and
+                -not $authSync.FallbackWin) {
+                try { [Console]::SetOut($origOut) } catch {}
+                $fbXaml = @"
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        Title="Logowanie: $_svcName" Width="480" Height="210"
+        WindowStartupLocation="CenterScreen" Topmost="True" ShowInTaskbar="False"
+        FontFamily="Segoe UI" FontSize="13" Background="#f4f6f9" ResizeMode="NoResize">
+  <Grid Margin="24,18,24,16">
+    <Grid.RowDefinitions>
+      <RowDefinition Height="Auto"/>
+      <RowDefinition Height="12"/>
+      <RowDefinition Height="Auto"/>
+      <RowDefinition Height="16"/>
+      <RowDefinition Height="6"/>
+      <RowDefinition Height="Auto"/>
+    </Grid.RowDefinitions>
+    <TextBlock Grid.Row="0" TextWrapping="Wrap" Foreground="#333">
+      Otworz w przegladarce i wpisz kod z okna <Bold>konsoli PowerShell</Bold> (za tym oknem):
+    </TextBlock>
+    <Border Grid.Row="2" Background="White" CornerRadius="6" Padding="10,8"
+            BorderBrush="#b3d0ee" BorderThickness="1">
+      <DockPanel>
+        <Button x:Name="btnFbOpen" DockPanel.Dock="Right" Content="Otworz" Width="72" Height="28"
+                Margin="8,0,0,0" Background="#0b5cab" Foreground="White" BorderThickness="0" FontWeight="Bold"/>
+        <TextBlock FontFamily="Consolas" FontSize="12" Foreground="#0b5cab" VerticalAlignment="Center"
+                   Text="https://microsoft.com/devicelogin"/>
+      </DockPanel>
+    </Border>
+    <ProgressBar Grid.Row="4" Height="6" IsIndeterminate="True" Foreground="#0b5cab" Background="#e0e0e0"/>
+    <TextBlock Grid.Row="5" Foreground="#999" FontSize="11"
+               Text="Okno zamknie sie automatycznie po zalogowaniu."/>
+  </Grid>
+</Window>
+"@
+                try {
+                    [xml]$fbXml2 = $fbXaml
+                    $fbWin = [Windows.Markup.XamlReader]::Load((New-Object System.Xml.XmlNodeReader $fbXml2))
+                    $fbWin.FindName('btnFbOpen').Add_Click({ Start-Process 'https://microsoft.com/devicelogin' })
+                    $authSync.FallbackWin = $fbWin
+                    $fbWin.Show()
+                } catch { Write-CISLog "Blad okna fallback: $($_.Exception.Message)" WARN }
+            }
+
+            if ($authSync.Done -or [DateTime]::UtcNow -gt $deadline) {
                 $dcTimer.Stop()
+                if ($authSync.FallbackWin) { $authSync.FallbackWin.Close(); $authSync.FallbackWin = $null }
                 $dcFrame.Continue = $false
             }
-        })
+        }.GetNewClosure())
         $dcTimer.Start()
         [System.Windows.Threading.Dispatcher]::PushFrame($dcFrame)
     } else {
+        # Tryb CLI - proste czekanie w petli
         $wLimit = 0
-        while (-not $authSync.Done -and $wLimit -lt 900) { [System.Threading.Thread]::Sleep(1000); $wLimit++ }
+        while (-not $authSync.Done -and $wLimit -lt 900) {
+            if (-not $authSync.Code) { & $scanSources }
+            if ($authSync.Code -and -not $authSync.CodeShown) {
+                $authSync.CodeShown = $true
+                Write-CISLog "Otworz: $($authSync.Url)  Kod: $(($authSync.Code.ToCharArray() -join ' '))" INFO
+            }
+            [System.Threading.Thread]::Sleep(1000); $wLimit++
+        }
     }
 
-    if ($dismissDialog) { & $dismissDialog }
-    try { $authPs.EndInvoke($authHandle) } catch { }
+    try { [Console]::SetOut($origOut) } catch {}
+    if ($authSync.DismissCallback) { & $authSync.DismissCallback }
+    try { $authPs.EndInvoke($authHandle) } catch {}
     $authPs.Dispose(); $authRs.Close()
     if ($authSync.Error) { throw $authSync.Error }
 }
