@@ -21,13 +21,13 @@ function Write-CISLog {
 function Confirm-CISModule {
     param([string]$Name)
     if (-not (Get-Module -ListAvailable -Name $Name)) {
-        Write-CISLog "Instaluje modul $Name (CurrentUser)..." WARN
+        Write-CISLog "Instaluje modul $Name..." WARN
         Install-Module -Name $Name -Scope CurrentUser -Force -AllowClobber -ErrorAction Stop
+        Write-CISLog "Zainstalowano $Name." OK
     }
-    if (-not (Get-Module -Name $Name)) {
-        Write-CISLog "Importuje modul $Name..." INFO
-        Import-Module -Name $Name -Force -ErrorAction Stop
-    }
+    Write-CISLog "Importuje modul $Name..." INFO
+    Import-Module -Name $Name -Force -ErrorAction Stop
+    Write-CISLog "Zaladowano $Name." OK
 }
 
 # ---------- HELPERY ----------
@@ -67,12 +67,9 @@ function Connect-CISServices {
 
     if (-not $SkipEntra) {
         Confirm-CISModule 'Microsoft.Graph'
-        # Microsoft.Graph to meta-modul; PS5.1 nie zawsze auto-importuje podmoduly.
-        # Jawnie ladujemy Microsoft.Graph.Authentication (zawiera Connect-MgGraph).
-        @('Microsoft.Graph.Authentication','Microsoft.Graph.Identity.SignIns',
-          'Microsoft.Graph.Identity.DirectoryManagement','Microsoft.Graph.Users',
-          'Microsoft.Graph.DeviceManagement','Microsoft.Graph.DeviceManagement.Administration') |
-            ForEach-Object { Import-Module $_ -Force -ErrorAction SilentlyContinue }
+        if (-not (Get-Command 'Connect-MgGraph' -ErrorAction SilentlyContinue)) {
+            throw "Import-Module Microsoft.Graph zakonczony, ale Connect-MgGraph nadal niedostepne.`nSprobuj uruchomic ponownie aplikacje. Jesli blad sie powtarza, wykonaj w PowerShell:`n  Uninstall-Module Microsoft.Graph -AllVersions -Force`n  Install-Module Microsoft.Graph -Scope CurrentUser -Force"
+        }
         Write-CISLog 'Lacze z Microsoft Graph...'
         Connect-MgGraph -NoWelcome -Scopes @(
             'Policy.ReadWrite.ConditionalAccess','Policy.Read.All','Application.Read.All',
