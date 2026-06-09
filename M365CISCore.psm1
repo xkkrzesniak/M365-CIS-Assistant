@@ -67,6 +67,12 @@ function Connect-CISServices {
 
     if (-not $SkipEntra) {
         Confirm-CISModule 'Microsoft.Graph'
+        # Microsoft.Graph to meta-modul; PS5.1 nie zawsze auto-importuje podmoduly.
+        # Jawnie ladujemy Microsoft.Graph.Authentication (zawiera Connect-MgGraph).
+        @('Microsoft.Graph.Authentication','Microsoft.Graph.Identity.SignIns',
+          'Microsoft.Graph.Identity.DirectoryManagement','Microsoft.Graph.Users',
+          'Microsoft.Graph.DeviceManagement','Microsoft.Graph.DeviceManagement.Administration') |
+            ForEach-Object { Import-Module $_ -Force -ErrorAction SilentlyContinue }
         Write-CISLog 'Lacze z Microsoft Graph...'
         Connect-MgGraph -NoWelcome -Scopes @(
             'Policy.ReadWrite.ConditionalAccess','Policy.Read.All','Application.Read.All',
