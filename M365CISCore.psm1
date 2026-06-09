@@ -367,10 +367,15 @@ function Connect-CISServices {
         Confirm-CISModule 'ExchangeOnlineManagement' -MinVersion '3.2.0'
         $exoMod = Get-Module ExchangeOnlineManagement | Sort-Object Version -Descending | Select-Object -First 1
         $script:ExoModFile = $exoMod.Path
-        Write-CISLog "Lacze z Exchange Online (EXO v$($exoMod.Version), token OAuth)..." INFO
-        # EXO token - ten sam MsalApp co Graph, SSO wiec zazwyczaj bez dodatkowego okna przegladarki
-        $exoToken = Get-CISMsalToken -Scopes @('https://outlook.office365.com/.default') -Label 'Exchange Online'
-        Connect-ExchangeOnline -AccessToken $exoToken -Organization $script:Ctx.TenantInitialDomain -ShowBanner:$false -ErrorAction Stop
+        Write-CISLog "Lacze z Exchange Online (EXO v$($exoMod.Version))..." INFO
+        # EXO ma wlasny MSAL. Podajemy UPN z Graph context - SSO powinno przejsc cicho (bez przegladarki).
+        $mgCtx = Get-MgContext
+        $exoUpn = if ($mgCtx.Account) { $mgCtx.Account } else { $null }
+        if ($exoUpn) {
+            Connect-ExchangeOnline -UserPrincipalName $exoUpn -ShowBanner:$false -ErrorAction Stop
+        } else {
+            Connect-ExchangeOnline -ShowBanner:$false -ErrorAction Stop
+        }
         $script:Ctx.Connected.EXO = $true
         try { Enable-OrganizationCustomization -ErrorAction SilentlyContinue } catch { }
         $script:Ctx.AcceptedDomains = (Get-AcceptedDomain).Name
@@ -404,9 +409,14 @@ function Connect-CISServices {
         if (-not $script:ExoModFile) {
             Confirm-CISModule 'ExchangeOnlineManagement' -MinVersion '3.2.0'
         }
-        Write-CISLog 'Lacze z Microsoft Purview / Security & Compliance (token OAuth)...' INFO
-        $purviewToken = Get-CISMsalToken -Scopes @('https://ps.compliance.protection.outlook.com/.default') -Label 'Purview'
-        Connect-IPPSSession -AccessToken $purviewToken -Organization $script:Ctx.TenantInitialDomain -ShowBanner:$false -ErrorAction Stop
+        Write-CISLog 'Lacze z Microsoft Purview / Security & Compliance...' INFO
+        $mgCtxP = Get-MgContext
+        $purviewUpn = if ($mgCtxP.Account) { $mgCtxP.Account } else { $null }
+        if ($purviewUpn) {
+            Connect-IPPSSession -UserPrincipalName $purviewUpn -ShowBanner:$false -ErrorAction Stop
+        } else {
+            Connect-IPPSSession -ShowBanner:$false -ErrorAction Stop
+        }
         $script:Ctx.Connected.Purview = $true
     }
     return $script:Ctx
