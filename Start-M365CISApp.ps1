@@ -28,6 +28,115 @@ $script:AppRoot = if ($PSScriptRoot) { $PSScriptRoot }
 
 Import-Module (Join-Path $script:AppRoot 'M365CISCore.psm1') -Force -ErrorAction Stop
 
+# --- Okno logowania (device code) ---
+function Show-DeviceCodeDialog {
+    param([string]$Url, [string]$Code)
+
+    $dcXaml = @'
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Logowanie - M365 CIS Assistant" Width="520" Height="320"
+        WindowStartupLocation="CenterScreen" ResizeMode="NoResize"
+        FontFamily="Segoe UI" FontSize="13" Background="#f4f6f9" Topmost="True" ShowInTaskbar="False">
+  <Grid>
+    <Grid.RowDefinitions>
+      <RowDefinition Height="56"/>
+      <RowDefinition Height="*"/>
+      <RowDefinition Height="44"/>
+    </Grid.RowDefinitions>
+
+    <!-- Pasek tytulowy -->
+    <Border Grid.Row="0" Background="#0b5cab">
+      <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Margin="20,0">
+        <TextBlock Text="🔑" FontSize="20" Foreground="White" VerticalAlignment="Center" Margin="0,0,10,0"/>
+        <StackPanel VerticalAlignment="Center">
+          <TextBlock Text="Logowanie do Microsoft 365" Foreground="White" FontSize="14" FontWeight="Bold"/>
+          <TextBlock Text="Uwierzytelnienie kodem urządzenia" Foreground="#c5dcf0" FontSize="11"/>
+        </StackPanel>
+      </StackPanel>
+    </Border>
+
+    <!-- Srodek -->
+    <Grid Grid.Row="1" Margin="24,18,24,8">
+      <Grid.RowDefinitions>
+        <RowDefinition Height="Auto"/>
+        <RowDefinition Height="Auto"/>
+        <RowDefinition Height="14"/>
+        <RowDefinition Height="Auto"/>
+        <RowDefinition Height="Auto"/>
+      </Grid.RowDefinitions>
+
+      <!-- Krok 1 -->
+      <TextBlock Grid.Row="0" Foreground="#444" Margin="0,0,0,6">
+        <Run FontWeight="SemiBold">1.</Run>
+        <Run>Otwórz w przeglądarce:</Run>
+      </TextBlock>
+      <Border Grid.Row="1" Background="White" CornerRadius="6" Padding="12,9"
+              BorderBrush="#b3d0ee" BorderThickness="1">
+        <DockPanel>
+          <Button x:Name="btnOpenUrl" DockPanel.Dock="Right" Content="Otwórz ↗"
+                  Width="84" Height="30" Margin="10,0,0,0" BorderThickness="0"
+                  Background="#0b5cab" Foreground="White" FontWeight="Bold" FontSize="12"/>
+          <TextBlock x:Name="lblUrl" FontFamily="Consolas" FontSize="12" FontWeight="SemiBold"
+                     Foreground="#0b5cab" VerticalAlignment="Center" TextWrapping="Wrap"/>
+        </DockPanel>
+      </Border>
+
+      <!-- Krok 2 -->
+      <TextBlock Grid.Row="3" Foreground="#444" Margin="0,0,0,6">
+        <Run FontWeight="SemiBold">2.</Run>
+        <Run>Wpisz ten kod:</Run>
+      </TextBlock>
+      <Border Grid.Row="4" Background="White" CornerRadius="6" Padding="14,10"
+              BorderBrush="#86c995" BorderThickness="2">
+        <DockPanel>
+          <Button x:Name="btnCopy" DockPanel.Dock="Right" Content="Kopiuj"
+                  Width="68" Height="36" Margin="12,0,0,0" BorderThickness="0"
+                  Background="#1a7f37" Foreground="White" FontWeight="Bold" FontSize="12"/>
+          <TextBlock x:Name="lblCode" FontFamily="Consolas" FontSize="32" FontWeight="Bold"
+                     Foreground="#1a7f37" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+        </DockPanel>
+      </Border>
+    </Grid>
+
+    <!-- Pasek postępu -->
+    <Border Grid.Row="2" Background="White" BorderBrush="#e0e0e0" BorderThickness="0,1,0,0">
+      <DockPanel Margin="20,0">
+        <ProgressBar DockPanel.Dock="Right" Width="120" Height="4" IsIndeterminate="True"
+                     VerticalAlignment="Center" Margin="10,0,0,0" Foreground="#0b5cab" Background="#e0e0e0"/>
+        <TextBlock Text="Oczekiwanie na logowanie… okno zamknie się automatycznie"
+                   Foreground="#888" FontSize="11" VerticalAlignment="Center"/>
+      </DockPanel>
+    </Border>
+  </Grid>
+</Window>
+'@
+
+    [xml]$dcXml = $dcXaml
+    $dcWin = [Windows.Markup.XamlReader]::Load((New-Object System.Xml.XmlNodeReader $dcXml))
+
+    $dcWin.FindName('lblUrl').Text  = $Url
+    $dcWin.FindName('lblCode').Text = $Code
+
+    # Przyciski - przechowaj wartosci w Tag zeby uniknac problemow z domknieciem
+    $btnOpen = $dcWin.FindName('btnOpenUrl')
+    $btnOpen.Tag = $Url
+    $btnOpen.Add_Click({ Start-Process $this.Tag })
+
+    $btnCp = $dcWin.FindName('btnCopy')
+    $btnCp.Tag = $Code -replace ' ',''
+    $btnCp.Add_Click({
+        [System.Windows.Clipboard]::SetText($this.Tag)
+        $this.Content = '✓ Skopiowano'
+        $this.Background = '#1557a0'
+    })
+
+    $dcWin.Show()
+
+    # Zwroc callback zamykajacy okno (wywolywany z watku UI po zakonczeniu auth)
+    return [scriptblock]::Create('$dcWin.Close()').GetNewClosure()
+}
+
 # --- Stan aplikacji ---
 $script:AllRows    = New-Object System.Collections.ObjectModel.ObservableCollection[object]   # pelna lista
 $script:View       = New-Object System.Collections.ObjectModel.ObservableCollection[object]   # widoczne (po filtrze)
@@ -304,6 +413,11 @@ $ctrl.btnSelNone.Add_Click({ foreach ($r in $script:View) { $r.Selected=$false }
 $ctrl.cmbLevel.Add_SelectionChanged({ Update-View })
 $ctrl.cmbStatus.Add_SelectionChanged({ Update-View })
 $ctrl.txtSearch.Add_TextChanged({ Update-View })
+
+Set-CISDeviceCodeCallback {
+    param($Url, $Code)
+    Show-DeviceCodeDialog -Url $Url -Code $Code
+}
 
 Load-ProfileList
 Write-CISLog 'GUI gotowe. Krok 1: Polacz z tenantem.' INFO

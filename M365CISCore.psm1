@@ -10,8 +10,10 @@
 #>
 
 # ---------- LOGOWANIE ----------
-$script:LogCallback = $null
-function Set-CISLogCallback { param([scriptblock]$Callback) $script:LogCallback = $Callback }
+$script:LogCallback      = $null
+$script:DeviceCodeCallback = $null   # scriptblock: param($Url, $Code) -> zwraca scriptblock do zamkniecia okna
+function Set-CISLogCallback        { param([scriptblock]$Callback) $script:LogCallback      = $Callback }
+function Set-CISDeviceCodeCallback { param([scriptblock]$Callback) $script:DeviceCodeCallback = $Callback }
 function Write-CISLog {
     param([string]$Message, [ValidateSet('INFO','OK','WARN','ERROR','SKIP','SCAN')]$Level='INFO')
     if ($script:LogCallback) { & $script:LogCallback $Message $Level; return }
@@ -103,20 +105,84 @@ function Connect-CISServices {
         try {
             Connect-MgGraph -NoWelcome -Scopes $mgScopes -ErrorAction Stop
         } catch {
-            # Konflikt wersji MSAL/WAM (np. starsza DLL z GAC: BrokerExtension.WithBroker).
-            # Fallback: device code auth - omija brokera calkowicie.
-            if ($_.Exception -is [System.MissingMethodException] -or $_.Exception.Message -match 'BrokerExtension|WithBroker|broker') {
-                Write-CISLog 'Blad brokera WAM (konflikt MSAL) - przelaczam na kod urzadzenia...' WARN
-                # Przekieruj Write-Host do logu GUI, zeby kod urzadzenia byl widoczny
-                function global:Write-Host {
-                    [CmdletBinding()] param([object]$Object,[System.ConsoleColor]$ForegroundColor,[System.ConsoleColor]$BackgroundColor,[switch]$NoNewline)
-                    if ($Object) { Write-CISLog ($Object | Out-String).Trim() INFO }
+            # Konflikt wersji MSAL/WAM (starsza DLL z GAC: BrokerExtension.WithBroker).
+            # Fallback: device code w osobnym runspace (omija broker calkowicie).
+            if ($_.Exception -is [System.MissingMethodException] -or $_.Exception.Message -match 'BrokerExtension|WithBroker') {
+                Write-CISLog 'Blad brokera WAM - przelaczam na logowanie z oknem kodu urzadzenia...' WARN
+
+                $authSync = [hashtable]::Synchronized(@{
+                    Done=$false; Error=$null; Code=$null; Url='https://microsoft.com/devicelogin'
+                })
+                $authRs = [runspacefactory]::CreateRunspace()
+                $authRs.Open()
+                $authRs.SessionStateProxy.SetVariable('authSync', $authSync)
+                $authRs.SessionStateProxy.SetVariable('mgScopes', $mgScopes)
+                $authPs = [powershell]::Create()
+                $authPs.Runspace = $authRs
+                [void]$authPs.AddScript({
+                    Import-Module Microsoft.Graph.Authentication -Force -ErrorAction SilentlyContinue
+                    # Przechwyc Write-Host zeby wyciagnac kod urzadzenia
+                    function Write-Host {
+                        param([object]$Object,[switch]$NoNewline,
+                              [System.ConsoleColor]$ForegroundColor,[System.ConsoleColor]$BackgroundColor)
+                        $msg = [string]$Object
+                        if ($msg -match '(https://[^\s]+devicelogin[^\s]*)') {
+                            $authSync.Url = $Matches[1].TrimEnd('.')
+                        }
+                        if ($msg -match '\bcode\s+([A-Z0-9]{7,12})\b') {
+                            $authSync.Code = $Matches[1]
+                        }
+                    }
+                    try {
+                        Connect-MgGraph -NoWelcome -UseDeviceAuthentication -Scopes $mgScopes -ErrorAction Stop
+                    } catch {
+                        $authSync.Error = $_.Exception.Message
+                    } finally {
+                        $authSync.Done = $true
+                    }
+                })
+                $authHandle = $authPs.BeginInvoke()
+
+                # Czekaj na pojawienie sie kodu (max 20s), sprawdzaj tez strumien Information
+                $waited = 0
+                while (-not $authSync.Code -and -not $authSync.Done -and $waited -lt 40) {
+                    foreach ($info in $authPs.Streams.Information) {
+                        $msg = [string]$info.MessageData
+                        if ($msg -match '(https://[^\s]+devicelogin[^\s]*)') { $authSync.Url = $Matches[1].TrimEnd('.') }
+                        if ($msg -match '\bcode\s+([A-Z0-9]{7,12})\b') { $authSync.Code = $Matches[1] }
+                    }
+                    [System.Threading.Thread]::Sleep(500); $waited++
                 }
-                try {
-                    Connect-MgGraph -NoWelcome -UseDeviceAuthentication -Scopes $mgScopes -ErrorAction Stop
-                } finally {
-                    Remove-Item function:global:Write-Host -ErrorAction SilentlyContinue
+
+                # Pokaz okno z kodem przez callback (GUI) lub log (CLI)
+                $dismissDialog = $null
+                if ($authSync.Code) {
+                    $codeDisplay = ($authSync.Code.ToCharArray() -join ' ')
+                    if ($script:DeviceCodeCallback) {
+                        $dismissDialog = & $script:DeviceCodeCallback $authSync.Url $codeDisplay
+                    } else {
+                        Write-CISLog ("=== LOGOWANIE KODEM ===" ) INFO
+                        Write-CISLog ("Otworz: $($authSync.Url)") INFO
+                        Write-CISLog ("Kod:    $codeDisplay") INFO
+                    }
                 }
+
+                # Czekaj na zakonczenie auth - DispatcherFrame zachowuje responsywnosc WPF
+                if ([System.Windows.Application]::Current) {
+                    $dcFrame = New-Object System.Windows.Threading.DispatcherFrame
+                    $dcTimer = New-Object System.Windows.Threading.DispatcherTimer
+                    $dcTimer.Interval = [TimeSpan]::FromMilliseconds(500)
+                    $dcTimer.Add_Tick({ if ($authSync.Done) { $dcTimer.Stop(); $dcFrame.Continue = $false } })
+                    $dcTimer.Start()
+                    [System.Windows.Threading.Dispatcher]::PushFrame($dcFrame)
+                } else {
+                    while (-not $authSync.Done) { [System.Threading.Thread]::Sleep(1000) }
+                }
+
+                if ($dismissDialog) { & $dismissDialog }
+                try { $authPs.EndInvoke($authHandle) } catch { }
+                $authPs.Dispose(); $authRs.Close()
+                if ($authSync.Error) { throw $authSync.Error }
             } else { throw }
         }
         $script:Ctx.Connected.Graph = $true
@@ -732,7 +798,7 @@ $ControlRegistry = @(
 function Get-CISControlDocs { $script:ControlDocs }
 
 Export-ModuleMember -Function `
-    Set-CISLogCallback, Write-CISLog, Confirm-CISModule, New-TestResult, ConvertTo-HtmlText, `
+    Set-CISLogCallback, Set-CISDeviceCodeCallback, Write-CISLog, Confirm-CISModule, New-TestResult, ConvertTo-HtmlText, `
     Reset-CISContext, Get-CISContext, Connect-CISServices, Disconnect-CISServices, `
     Get-CISUsers, Set-CISBreakGlass, Invoke-CISScan, Invoke-CISApply, Remove-CISLegacyPolicies, `
     Get-CISProfileSelection, Import-CISProfile, Save-CISProfile, `
