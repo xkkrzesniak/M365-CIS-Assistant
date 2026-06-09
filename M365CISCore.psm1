@@ -24,6 +24,10 @@ function Confirm-CISModule {
         Write-CISLog "Instaluje modul $Name (CurrentUser)..." WARN
         Install-Module -Name $Name -Scope CurrentUser -Force -AllowClobber -ErrorAction Stop
     }
+    if (-not (Get-Module -Name $Name)) {
+        Write-CISLog "Importuje modul $Name..." INFO
+        Import-Module -Name $Name -Force -ErrorAction Stop
+    }
 }
 
 # ---------- HELPERY ----------
