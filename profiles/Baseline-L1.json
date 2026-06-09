@@ -1,0 +1,5 @@
+{
+  "name": "Baseline L1",
+  "description": "Wszystkie kontrolki CIS poziomu L1 - bezpieczny baseline dla Business Premium.",
+  "select": { "ids": [], "levels": [1], "areas": [], "excludeIds": [] }
+}

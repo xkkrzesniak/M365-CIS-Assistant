@@ -1,0 +1,14 @@
+# Skompilowany launcher
+*.exe
+
+# Logi i raporty generowane przez aplikacje
+*.log
+*-scan.csv
+*-applied.csv
+*-report.html
+
+# Profile zapisane przez uzytkownika (domyslne profile sa w repozytorium)
+profiles/Custom-*.json
+
+# macOS
+.DS_Store

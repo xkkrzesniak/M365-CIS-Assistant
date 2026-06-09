@@ -1,0 +1,5 @@
+{
+  "name": "Identity Core",
+  "description": "Kontrolki Entra ID / Conditional Access i uwierzytelniania - bez Exchange/SPO/Teams.",
+  "select": { "ids": [], "levels": [], "areas": ["Entra ID"], "excludeIds": [] }
+}

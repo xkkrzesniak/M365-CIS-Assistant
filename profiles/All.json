@@ -1,0 +1,5 @@
+{
+  "name": "All Controls",
+  "description": "Wszystkie zarejestrowane kontrolki L1 i L2 bez wyjątków.",
+  "select": { "ids": [], "levels": [], "areas": [], "excludeIds": [] }
+}

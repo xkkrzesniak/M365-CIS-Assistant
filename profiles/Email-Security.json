@@ -1,0 +1,5 @@
+{
+  "name": "Email Security",
+  "description": "Exchange Online + Defender for Office 365 + uwierzytelnianie poczty (DKIM/DMARC/SPF).",
+  "select": { "ids": [], "levels": [], "areas": ["Exchange", "Defender", "Email-Auth"], "excludeIds": [] }
+}

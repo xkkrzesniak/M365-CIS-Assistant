@@ -1,0 +1,5 @@
+{
+  "name": "Strict L1+L2",
+  "description": "Wszystkie kontrolki CIS poziomów L1 i L2 - pełny hardening dla Business Premium.",
+  "select": { "ids": [], "levels": [1, 2], "areas": [], "excludeIds": [] }
+}
