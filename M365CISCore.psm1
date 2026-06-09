@@ -79,41 +79,55 @@ function Test-WamBrokerError {
 function Invoke-CISDeviceConnect {
     param([string]$ServiceName, [string]$ConnectInvoke)
     Write-CISLog ("$ServiceName - logowanie kodem urzadzenia (WAM broker niedostepny)...") WARN
+
     $authSync = [hashtable]::Synchronized(@{ Done=$false; Error=$null; Code=$null; Url='https://microsoft.com/devicelogin' })
-    $authRs = [runspacefactory]::CreateRunspace()
+    $authRs   = [runspacefactory]::CreateRunspace()
     $authRs.Open()
-    $authRs.SessionStateProxy.SetVariable('authSync', $authSync)
+    $authRs.SessionStateProxy.SetVariable('authSync',       $authSync)
     $authRs.SessionStateProxy.SetVariable('_connectInvoke', $ConnectInvoke)
+    # Propaguj PSModulePath zeby runspace znalazl te same wersje modulow co sesja glowna
+    $authRs.SessionStateProxy.SetVariable('_psModulePath',  $env:PSModulePath)
+
     $authPs = [powershell]::Create()
     $authPs.Runspace = $authRs
     [void]$authPs.AddScript({
+        $env:PSModulePath = $_psModulePath   # upewnij sie ze runspace widzi te same moduly
         function Write-Host {
             param([object]$Object,[switch]$NoNewline,
                   [System.ConsoleColor]$ForegroundColor,[System.ConsoleColor]$BackgroundColor)
             $msg = [string]$Object
             if ($msg -match '(https://[^\s]+devicelogin[^\s]*)') { $authSync.Url = $Matches[1].TrimEnd('.') }
-            if ($msg -match '\bcode\s+([A-Z0-9]{7,12})\b') { $authSync.Code = $Matches[1] }
+            if ($msg -match '\bcode\s+([A-Z0-9]{7,12})\b')       { $authSync.Code = $Matches[1] }
         }
         function Write-Warning {
             param([object]$Message)
             $msg = [string]$Message
             if ($msg -match '(https://[^\s]+devicelogin[^\s]*)') { $authSync.Url = $Matches[1].TrimEnd('.') }
-            if ($msg -match '\bcode\s+([A-Z0-9]{7,12})\b') { $authSync.Code = $Matches[1] }
+            if ($msg -match '\bcode\s+([A-Z0-9]{7,12})\b')       { $authSync.Code = $Matches[1] }
         }
-        try { Invoke-Expression $_connectInvoke }
+        try   { Invoke-Expression $_connectInvoke }
         catch { $authSync.Error = $_.Exception.Message }
         finally { $authSync.Done = $true }
     })
     $authHandle = $authPs.BeginInvoke()
+
+    # Czekaj na kod (max 20s) - sprawdzaj Information ORAZ Warning (EXO uzywa Warning)
     $waited = 0
     while (-not $authSync.Code -and -not $authSync.Done -and $waited -lt 40) {
-        foreach ($info in $authPs.Streams.Information) {
-            $msg = [string]$info.MessageData
+        foreach ($item in $authPs.Streams.Information) {
+            $msg = [string]$item.MessageData
             if ($msg -match '(https://[^\s]+devicelogin[^\s]*)') { $authSync.Url = $Matches[1].TrimEnd('.') }
-            if ($msg -match '\bcode\s+([A-Z0-9]{7,12})\b') { $authSync.Code = $Matches[1] }
+            if ($msg -match '\bcode\s+([A-Z0-9]{7,12})\b')       { $authSync.Code = $Matches[1] }
+        }
+        foreach ($item in $authPs.Streams.Warning) {
+            $msg = [string]$item.Message
+            if ($msg -match '(https://[^\s]+devicelogin[^\s]*)') { $authSync.Url = $Matches[1].TrimEnd('.') }
+            if ($msg -match '\bcode\s+([A-Z0-9]{7,12})\b')       { $authSync.Code = $Matches[1] }
         }
         [System.Threading.Thread]::Sleep(500); $waited++
     }
+
+    # Pokaz kod lub fallback gdy kod nie zostal przechwycony
     $dismissDialog = $null
     if ($authSync.Code) {
         $codeDisplay = ($authSync.Code.ToCharArray() -join ' ')
@@ -124,19 +138,42 @@ function Invoke-CISDeviceConnect {
             Write-CISLog "Otworz: $($authSync.Url)" INFO
             Write-CISLog "Kod:    $codeDisplay" INFO
         }
-    } else {
-        Write-CISLog "$ServiceName - kod nie wykryty; sprawdz okno konsoli." WARN
+    } elseif (-not $authSync.Done) {
+        # Nie przechwycono kodu - poinformuj uzytkownika zeby sprawdzil konsole
+        Write-CISLog "$ServiceName - kod automatycznie nie wykryty. Sprawdz okno konsoli PS." WARN
+        if ([System.Windows.Application]::Current) {
+            [System.Windows.Application]::Current.Dispatcher.Invoke([action]{
+                [System.Windows.MessageBox]::Show(
+                    "Nie udalo sie automatycznie wykryc kodu logowania dla:`n$ServiceName`n`n" +
+                    "W tle (w oknie konsoli PowerShell) powinien byc wyswietlony kod.`n" +
+                    "Otworz: https://microsoft.com/devicelogin i wpisz ten kod,`n" +
+                    "a aplikacja sie automatycznie odblokuje.`n`n" +
+                    "Jesli nie widzisz konsoli - sprawdz pasek zadan.",
+                    "Logowanie: $ServiceName", 'OK', 'Information'
+                ) | Out-Null
+            })
+        }
     }
+
+    # Czekaj na zakonczenie auth - DispatcherFrame zachowuje responsywnosc WPF (timeout 15 min)
     if ([System.Windows.Application]::Current) {
         $dcFrame = New-Object System.Windows.Threading.DispatcherFrame
         $dcTimer = New-Object System.Windows.Threading.DispatcherTimer
         $dcTimer.Interval = [TimeSpan]::FromMilliseconds(500)
-        $dcTimer.Add_Tick({ if ($authSync.Done) { $dcTimer.Stop(); $dcFrame.Continue = $false } })
+        $dcDeadline = [DateTime]::UtcNow.AddMinutes(15)
+        $dcTimer.Add_Tick({
+            if ($authSync.Done -or [DateTime]::UtcNow -gt $dcDeadline) {
+                $dcTimer.Stop()
+                $dcFrame.Continue = $false
+            }
+        })
         $dcTimer.Start()
         [System.Windows.Threading.Dispatcher]::PushFrame($dcFrame)
     } else {
-        while (-not $authSync.Done) { [System.Threading.Thread]::Sleep(1000) }
+        $wLimit = 0
+        while (-not $authSync.Done -and $wLimit -lt 900) { [System.Threading.Thread]::Sleep(1000); $wLimit++ }
     }
+
     if ($dismissDialog) { & $dismissDialog }
     try { $authPs.EndInvoke($authHandle) } catch { }
     $authPs.Dispose(); $authRs.Close()
@@ -228,6 +265,12 @@ Connect-MgGraph -NoWelcome -UseDeviceAuthentication -Scopes `$s -ErrorAction Sto
     }
     if (-not $SkipExchange) {
         Confirm-CISModule 'ExchangeOnlineManagement' -MinVersion '3.2.0'
+        # Runtime check: jesli zaladowana wersja nadal nie ma parametru -Device, wymus aktualizacje
+        if (-not (Get-Command Connect-ExchangeOnline -ErrorAction SilentlyContinue).Parameters.ContainsKey('Device')) {
+            Write-CISLog 'Zaladowana wersja EXO nie ma parametru -Device; wymuszam aktualizacje...' WARN
+            Install-Module ExchangeOnlineManagement -Scope CurrentUser -Force -AllowClobber -ErrorAction SilentlyContinue
+            Import-Module ExchangeOnlineManagement -Force -ErrorAction SilentlyContinue
+        }
         Write-CISLog 'Lacze z Exchange Online...'
         if ($script:WamBroken) {
             Invoke-CISDeviceConnect -ServiceName 'Exchange Online' -ConnectInvoke @'
