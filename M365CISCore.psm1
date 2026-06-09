@@ -601,6 +601,13 @@ $script:ControlDocs = @{
     'ENTRA-GUEST-PERMS'          = 'Ustawiono najbardziej restrykcyjne uprawnienia gości (GuestUserRoleId = Restricted Guest User). Goście widzą tylko swój własny profil i nie mogą enumerować katalogu.'
     'ENTRA-GUEST-INVITE'         = 'Zapraszanie gości do tenanta ograniczono do administratorów i użytkowników z rolą Guest Inviter (AllowInvitesFrom = adminsAndGuestInviters).'
     'ENTRA-PORTAL'               = 'Ograniczono dostęp do portalu Microsoft Entra tylko do administratorów (EnableAdminPanelRestriction = true). Zwykli użytkownicy nie mogą przeglądać katalogu przez portal.'
+    'ENTRA-M365GROUP'            = 'Zablokowano tworzenie grup Microsoft 365 przez zwykłych użytkowników (EnableGroupCreation = false w Group.Unified). Grupy tworzy wyłącznie administrator.'
+    'MDO-MALWARE'                = 'Włączono filtr typów plików w polityce anti-malware (EnableFileFilter = true). Blokuje wykonywalne i potencjalnie niebezpieczne typy załączników.'
+    'MDO-ANTISPAM-IN'            = 'Skonfigurowano politykę antyspam: wiadomości HC spam, phishing i HC phishing kierowane do kwarantanny. Safety Tips włączone.'
+    'MDO-ANTISPAM-OUT'           = 'Polityka antyspam wychodzący: konta przekraczające limit wysyłki są blokowane (ActionWhenThresholdReached = BlockUser), podejrzane wiadomości BCC do admina.'
+    'TEAMS-EXTERNAL'             = 'Zablokowano połączenia z publicznymi użytkownikami Skype w Teams (AllowPublicUsers = false).'
+    'TEAMS-GUESTCALL'            = 'Wyłączono prywatne połączenia głosowe dla gości w Teams (AllowPrivateCalling = false).'
+    'TEAMS-RECORDING'            = 'Wyłączono nagrywanie spotkań Teams (AllowCloudRecording = false). Zalecenie CIS L2 - rozważ, czy organizacja nie wymaga nagrywania.'
     'EXO-AUDIT'                  = 'Włączono Unified Audit Log (rejestrowanie zdarzeń w całym tenancie).'
     'EXO-MBXAUDIT'              = 'Włączono domyślny audyt skrzynek pocztowych (AuditDisabled = false).'
     'EXO-MODERNAUTH'           = 'Wymuszono Modern Authentication (OAuth2ClientProfileEnabled = true).'
@@ -877,6 +884,36 @@ $ControlRegistry = @(
         }
     },
 
+    [pscustomobject]@{
+        Id='ENTRA-M365GROUP'; Service='Graph'; Area='Entra ID'; Cis='1.1.8'; Level=1
+        Name='Zablokuj tworzenie grup Microsoft 365 przez zwykłych użytkowników'
+        Test={
+            $tmpl = Get-MgDirectorySettingTemplate | Where-Object DisplayName -eq 'Group.Unified' | Select-Object -First 1
+            if (-not $tmpl) { return New-TestResult $false 'Brak szablonu Group.Unified' }
+            $setting = Get-MgDirectorySetting | Where-Object TemplateId -eq $tmpl.Id | Select-Object -First 1
+            if (-not $setting) { return New-TestResult $false 'Brak ustawienia - domyslnie tworzenie wlaczone' }
+            $val = ($setting.Values | Where-Object Name -eq 'EnableGroupCreation').Value
+            New-TestResult ($val -eq 'false') ("EnableGroupCreation=$val")
+        }
+        Apply={
+            $tmpl = Get-MgDirectorySettingTemplate | Where-Object DisplayName -eq 'Group.Unified' | Select-Object -First 1
+            $setting = Get-MgDirectorySetting | Where-Object TemplateId -eq $tmpl.Id | Select-Object -First 1
+            if ($setting) {
+                $newVals = @()
+                foreach ($v in $setting.Values) {
+                    $newVals += if ($v.Name -eq 'EnableGroupCreation') { @{Name='EnableGroupCreation';Value='false'} }
+                                else { @{Name=$v.Name;Value=$v.Value} }
+                }
+                Update-MgDirectorySetting -DirectorySettingId $setting.Id -Values $newVals
+            } else {
+                $allVals = $tmpl.Values | ForEach-Object {
+                    @{Name=$_.Name; Value=if($_.Name -eq 'EnableGroupCreation'){'false'}else{$_.DefaultValue}}
+                }
+                New-MgDirectorySetting -TemplateId $tmpl.Id -Values $allVals | Out-Null
+            }
+        }
+    },
+
     #----- EXCHANGE ONLINE / DEFENDER FOR OFFICE 365 -----
     [pscustomobject]@{
         Id='EXO-AUDIT'; Service='EXO'; Area='Exchange'; Cis='3.1.1'; Level=1
@@ -965,6 +1002,53 @@ $ControlRegistry = @(
         Test={ $a=Get-AtpPolicyForO365; New-TestResult ([bool]$a.EnableSafeDocs -and [bool]$a.EnableATPForSPOTeamsODB) ("SafeDocs="+$a.EnableSafeDocs+"; SPO/ODB/Teams="+$a.EnableATPForSPOTeamsODB) }
         Apply={ Set-AtpPolicyForO365 -EnableSafeDocs $true -EnableATPForSPOTeamsODB $true -AllowSafeDocsOpen $false }
     },
+    [pscustomobject]@{
+        Id='MDO-MALWARE'; Service='EXO'; Area='Defender'; Cis='2.1.7'; Level=1
+        Name='Anti-malware: filtr niebezpiecznych typów plików'
+        Test={
+            $p = Get-MalwareFilterPolicy -Identity Default -ErrorAction SilentlyContinue
+            if (-not $p) { return New-TestResult $false 'Brak polityki Default' }
+            New-TestResult ([bool]$p.EnableFileFilter) ("EnableFileFilter="+$p.EnableFileFilter)
+        }
+        Apply={ Set-MalwareFilterPolicy -Identity Default -EnableFileFilter $true }
+    },
+    [pscustomobject]@{
+        Id='MDO-ANTISPAM-IN'; Service='EXO'; Area='Defender'; Cis='2.1.5'; Level=1
+        Name='Anti-spam przychodzący: phishing i HC spam do kwarantanny'
+        Test={
+            $p = Get-HostedContentFilterPolicy -Identity Default -ErrorAction SilentlyContinue
+            if (-not $p) { return New-TestResult $false 'Brak polityki Default' }
+            $ok = ($p.HighConfidenceSpamAction -eq 'Quarantine') -and
+                  ($p.PhishSpamAction -eq 'Quarantine') -and
+                  ($p.HighConfidencePhishAction -eq 'Quarantine')
+            New-TestResult $ok ("HCSpam="+$p.HighConfidenceSpamAction+"; Phish="+$p.PhishSpamAction+"; HCPhish="+$p.HighConfidencePhishAction)
+        }
+        Apply={
+            Set-HostedContentFilterPolicy -Identity Default `
+                -HighConfidenceSpamAction Quarantine `
+                -PhishSpamAction Quarantine `
+                -HighConfidencePhishAction Quarantine `
+                -SpamAction MoveToJmf `
+                -BulkSpamAction MoveToJmf `
+                -EnableSafetyTips $true
+        }
+    },
+    [pscustomobject]@{
+        Id='MDO-ANTISPAM-OUT'; Service='EXO'; Area='Defender'; Cis='2.1.9'; Level=1
+        Name='Anti-spam wychodzący: blokuj konta rozsyłające spam'
+        Test={
+            $p = Get-HostedOutboundSpamFilterPolicy -Identity Default -ErrorAction SilentlyContinue
+            if (-not $p) { return New-TestResult $false 'Brak polityki Default' }
+            $ok = $p.ActionWhenThresholdReached -in @('BlockUser','BlockUserAndSendBounce')
+            New-TestResult $ok ("Action="+$p.ActionWhenThresholdReached+"; BccSuspicious="+$p.BccSuspiciousOutboundMail)
+        }
+        Apply={
+            Set-HostedOutboundSpamFilterPolicy -Identity Default `
+                -ActionWhenThresholdReached BlockUser `
+                -BccSuspiciousOutboundMail $true `
+                -NotifyOutboundSpam $true
+        }
+    },
 
     #----- SHAREPOINT ONLINE / ONEDRIVE -----
     [pscustomobject]@{
@@ -995,6 +1079,34 @@ $ControlRegistry = @(
         Test={ $m=Get-CsTeamsMeetingPolicy -Identity Global; New-TestResult (-not $m.AllowAnonymousUsersToJoinMeeting) ("AnonJoin="+$m.AllowAnonymousUsersToJoinMeeting) }
         Apply={ Set-CsTeamsMeetingPolicy -Identity Global -AllowAnonymousUsersToJoinMeeting $false `
                     -AllowAnonymousUsersToStartMeeting $false -AutoAdmittedUsers EveryoneInCompanyExcludingGuests }
+    },
+    [pscustomobject]@{
+        Id='TEAMS-EXTERNAL'; Service='Teams'; Area='Teams'; Cis='8.2.1'; Level=1
+        Name='Zablokuj połączenia z użytkownikami publicznymi Skype'
+        Test={
+            $f = Get-CsTenantFederationConfiguration
+            New-TestResult (-not $f.AllowPublicUsers) ("AllowPublicUsers="+$f.AllowPublicUsers)
+        }
+        Apply={ Set-CsTenantFederationConfiguration -AllowPublicUsers $false }
+    },
+    [pscustomobject]@{
+        Id='TEAMS-GUESTCALL'; Service='Teams'; Area='Teams'; Cis='8.3'; Level=1
+        Name='Goście nie mogą dzwonić w Teams'
+        Test={
+            $g = Get-CsTeamsGuestCallingConfiguration -ErrorAction SilentlyContinue
+            if (-not $g) { return New-TestResult $true 'Brak konfiguracji (domyslnie: wyłączone)' }
+            New-TestResult (-not $g.AllowPrivateCalling) ("AllowPrivateCalling="+$g.AllowPrivateCalling)
+        }
+        Apply={ Set-CsTeamsGuestCallingConfiguration -AllowPrivateCalling $false }
+    },
+    [pscustomobject]@{
+        Id='TEAMS-RECORDING'; Service='Teams'; Area='Teams'; Cis='8.5'; Level=2
+        Name='Nagrywanie spotkań Teams: wyłączone (CIS L2)'
+        Test={
+            $p = Get-CsTeamsMeetingPolicy -Identity Global
+            New-TestResult (-not $p.AllowCloudRecording) ("AllowCloudRecording="+$p.AllowCloudRecording)
+        }
+        Apply={ Set-CsTeamsMeetingPolicy -Identity Global -AllowCloudRecording $false }
     },
 
     #----- UWIERZYTELNIANIE POCZTY DOMEN (DKIM / DMARC / SPF) -----
