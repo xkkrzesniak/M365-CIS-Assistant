@@ -57,7 +57,7 @@ function Reset-CISContext {
         TenantName=$null; TenantInitialDomain=$null; TenantId=$null; TenantDisplayName=$null
         AcceptedDomains=@()
         CaState='enabledForReportingButNotEnforced'
-        Connected=@{ Graph=$false; EXO=$false; SPO=$false; Teams=$false; Intune=$false; Purview=$false }
+        Connected=@{ Graph=$false; EXO=$false; SPO=$false; Teams=$false; Intune=$false; Purview=$false; PowerPlatform=$false }
     }
     return $script:Ctx
 }
@@ -308,6 +308,7 @@ function Connect-CISServices {
     param(
         [switch]$SkipEntra, [switch]$SkipExchange, [switch]$SkipSharePoint,
         [switch]$SkipTeams, [switch]$SkipIntune, [switch]$SkipPurview,
+        [switch]$SkipPowerPlatform,
         [string]$TenantDomain,
         [ValidateSet('ReportOnly','Enabled')][string]$ConditionalAccessState='ReportOnly'
     )
@@ -418,6 +419,18 @@ function Connect-CISServices {
         }
         $script:Ctx.Connected.Purview = $true
     }
+    if (-not $SkipPowerPlatform) {
+        try {
+            Confirm-CISModule 'Microsoft.PowerApps.Administration.PowerShell' -MinVersion '2.0.0' -ErrorAction SilentlyContinue
+            Write-CISLog 'Lacze z Power Platform...' INFO
+            Add-PowerAppsAccount -ErrorAction Stop
+            $script:Ctx.Connected.PowerPlatform = $true
+            Write-CISLog 'Power Platform - polaczono.' OK
+        } catch {
+            Write-CISLog ("Power Platform pominiety: {0}" -f $_.Exception.Message) WARN
+            $script:Ctx.Connected.PowerPlatform = $false
+        }
+    } else { $script:Ctx.Connected.PowerPlatform = $false }
     return $script:Ctx
 }
 function Disconnect-CISServices {
@@ -642,6 +655,17 @@ $script:ControlDocs = @{
     'PUR-RETENTION'              = 'Polityka retencji obejmuje Exchange, SharePoint i Teams - zapewnia przechowywanie danych przez wymagany okres zgodnie z przepisami.'
     'MDO-ZAP'                    = 'Zero-hour Auto Purge (ZAP) włączony dla spam, phishing i malware - retro-usuwa złośliwe wiadomości już po dostarczeniu, gdy nowa sygnatura zostanie wykryta.'
     'EXO-FORWARDINGRULES'        = 'Audyt zewnętrznych reguł przekazywania poczty - wykrywa skrzynki z ForwardingSmtpAddress oraz reguły Inbox Rules kierujące pocztę na zewnętrzne adresy. Wymaga ręcznego przeglądu.'
+    'PP-ENVCONFIG'               = 'Power Platform: tylko administratorzy mogą tworzyć nowe środowiska produkcyjne. Zapobiega niekontrolowanemu tworzeniu środowisk przez użytkowników.'
+    'PP-TRIALENV'                = 'Power Platform: blokada tworzenia środowisk trial (próbnych) przez zwykłych użytkowników. CIS 9.1.2 L1.'
+    'PP-SHAREWITHTENANT'         = 'Power Platform: użytkownicy nie mogą udostępniać canvas apps dla całego tenanta. Ogranicza masowe udostępnianie danych.'
+    'COPILOT-PLUGINS'            = 'Copilot M365: zarządzanie wtyczkami od zewnętrznych wydawców. Niezweryfikowane pluginy mogą eksfiltrować dane lub naruszać polityki DLP. CIS 1.3.1 L1.'
+    'COPILOT-M365GROUPS'         = 'Copilot M365: audyt przypisania licencji — tylko autoryzowani użytkownicy powinni mieć dostęp do Copilot. Weryfikuje licencje COPILOT/M365_COPILOT.'
+    'INTUNE-ENCRYPT-WIN'         = 'Intune: szyfrowanie BitLocker wymagane w polityce zgodności Windows. Chroni dane na zagubionych/skradzionych urządzeniach. CIS 5.2.1 L1.'
+    'INTUNE-AV-WIN'              = 'Intune: aktywny program antywirusowy wymagany przez politykę zgodności Windows. Urządzenia bez AV są blokowane. CIS 5.2.2 L1.'
+    'INTUNE-FIREWALL-WIN'        = 'Intune: zapora sieciowa (Windows Firewall) wymagana przez politykę zgodności. CIS 5.2.3 L1.'
+    'INTUNE-JAILBREAK'           = 'Intune: blokada urządzeń mobilnych z jailbreak (iOS) lub root (Android). Takie urządzenia omijają kontrole bezpieczeństwa systemu. CIS 5.1.1 L1.'
+    'PUR-DLP-TEAMS'              = 'Purview DLP: polityka zapobiegania utracie danych obejmująca czat i kanały Teams. Zapobiega udostępnianiu poufnych informacji przez Teams. CIS 3.3.3 L1.'
+    'PUR-INSIDER-RISK'           = 'Purview Insider Risk Management: aktywna polityka wykrywająca podejrzane działania wewnętrzne (wycieki danych, sabotaż). Wymaga licencji E5 Compliance. CIS 3.5 L2.'
 }
 
 # ---------- RAPORT HTML ----------
@@ -1445,6 +1469,182 @@ $ControlRegistry = @(
                     -ErrorAction SilentlyContinue | Out-Null
             }
         }
+    },
+    #----- POWER PLATFORM -----
+    [pscustomobject]@{
+        Id='PP-ENVCONFIG'; Service='PowerPlatform'; Area='Power Platform'; Cis='9.1.1'; Level=1
+        Name='Power Platform: tworzenie srodowisk tylko przez adminow'
+        Test={
+            try {
+                $s = Get-TenantSettings -ErrorAction Stop
+                New-TestResult ([bool]$s.disableEnvironmentCreationByNonAdminUsers) ("disableEnvCreation=$($s.disableEnvironmentCreationByNonAdminUsers)")
+            } catch { New-TestResult $false "Blad odczytu ustawien PP: $_" }
+        }
+        Apply={
+            $s = Get-TenantSettings
+            $s.disableEnvironmentCreationByNonAdminUsers = $true
+            Set-TenantSettings $s | Out-Null
+        }
+    },
+    [pscustomobject]@{
+        Id='PP-TRIALENV'; Service='PowerPlatform'; Area='Power Platform'; Cis='9.1.2'; Level=1
+        Name='Power Platform: blokada trial environment przez uzytkownikow'
+        Test={
+            try {
+                $s = Get-TenantSettings -ErrorAction Stop
+                New-TestResult ([bool]$s.disableTrialEnvironmentCreationByNonAdminUsers) ("disableTrialEnv=$($s.disableTrialEnvironmentCreationByNonAdminUsers)")
+            } catch { New-TestResult $false "Blad: $_" }
+        }
+        Apply={
+            $s = Get-TenantSettings
+            $s.disableTrialEnvironmentCreationByNonAdminUsers = $true
+            Set-TenantSettings $s | Out-Null
+        }
+    },
+    [pscustomobject]@{
+        Id='PP-SHAREWITHTENANT'; Service='PowerPlatform'; Area='Power Platform'; Cis='9.1.3'; Level=2
+        Name='Power Platform: blokada udostepniania canvas app dla calego tenanta'
+        Test={
+            try {
+                $s = Get-TenantSettings -ErrorAction Stop
+                New-TestResult ([bool]$s.disableShareWithEveryoneByNonAdminUsers) ("disableShareAll=$($s.disableShareWithEveryoneByNonAdminUsers)")
+            } catch { New-TestResult $false "Blad: $_" }
+        }
+        Apply={
+            $s = Get-TenantSettings
+            $s.disableShareWithEveryoneByNonAdminUsers = $true
+            Set-TenantSettings $s | Out-Null
+        }
+    },
+    #----- MICROSOFT COPILOT (M365 AI) -----
+    [pscustomobject]@{
+        Id='COPILOT-PLUGINS'; Service='Graph'; Area='Copilot'; Cis='1.3.1'; Level=1
+        Name='Copilot: zarzadzanie wtyczkami (pluginami) od zewnetrznych wydawcow'
+        Test={
+            try {
+                $policy = Invoke-MgGraphRequest -Method GET -Uri 'https://graph.microsoft.com/beta/admin/microsoft365Apps/installation/policy' -ErrorAction Stop
+                $blocked = $policy.isThirdPartyAppsBlocked
+                New-TestResult ([bool]$blocked) ("isThirdPartyAppsBlocked=$blocked")
+            } catch {
+                New-TestResult $false "Nie mozna odczytac polityki Copilot plugins: sprawdz w M365 Admin Center > Copilot"
+            }
+        }
+        Apply={ Write-CISLog 'COPILOT-PLUGINS: Skonfiguruj w M365 Admin Center > Copilot > Manage Plugins.' WARN }
+    },
+    [pscustomobject]@{
+        Id='COPILOT-M365GROUPS'; Service='Graph'; Area='Copilot'; Cis='1.3.2'; Level=1
+        Name='Copilot: audyt uprawnien - tylko licencjonowani uzytkownicy maja dostep'
+        Test={
+            try {
+                $skus = Invoke-MgGraphRequest -Method GET -Uri 'https://graph.microsoft.com/v1.0/subscribedSkus' -ErrorAction Stop
+                $copilotSku = $skus.value | Where-Object { $_.skuPartNumber -match 'COPILOT|M365_COPILOT' }
+                if ($copilotSku) {
+                    $total = ($copilotSku | Measure-Object -Property consumedUnits -Sum).Sum
+                    New-TestResult $true ("Licencje Copilot: $total aktywnych. Zweryfikuj przypisanie tylko uprawnionym uzytkownikom.")
+                } else {
+                    New-TestResult $true 'Brak licencji Copilot M365 w tenancie (nie dotyczy).'
+                }
+            } catch { New-TestResult $false "Blad: $_" }
+        }
+        Apply={ Write-CISLog 'COPILOT-M365GROUPS: Audyt reczny - sprawdz przypisanie licencji Copilot w M365 Admin Center.' WARN }
+    },
+    #----- INTUNE ROZSZERZONE -----
+    [pscustomobject]@{
+        Id='INTUNE-ENCRYPT-WIN'; Service='Intune'; Area='Intune'; Cis='5.2.1'; Level=1
+        Name='Intune: wymaganie szyfrowania BitLocker (Windows)'
+        Test={
+            try {
+                $policies = Invoke-MgGraphRequest -Method GET -Uri 'https://graph.microsoft.com/v1.0/deviceManagement/deviceCompliancePolicies' -ErrorAction Stop
+                $winPolicies = $policies.value | Where-Object { $_.'@odata.type' -match 'windows10' }
+                if (-not $winPolicies) { return New-TestResult $false 'Brak polityk zgodnosci Windows w Intune' }
+                $withEncrypt = $winPolicies | ForEach-Object {
+                    $p = Invoke-MgGraphRequest -Method GET -Uri "https://graph.microsoft.com/v1.0/deviceManagement/deviceCompliancePolicies/$($_.id)" -ErrorAction SilentlyContinue
+                    $p
+                } | Where-Object { $_.bitLockerEnabled -eq $true }
+                New-TestResult ($withEncrypt.Count -gt 0) ("Polityki z BitLocker: $($withEncrypt.Count)/$($winPolicies.Count)")
+            } catch { New-TestResult $false "Blad: $_" }
+        }
+        Apply={ Write-CISLog 'INTUNE-ENCRYPT-WIN: Wlacz bitLockerEnabled w polityce zgodnosci Windows w Intune.' WARN }
+    },
+    [pscustomobject]@{
+        Id='INTUNE-AV-WIN'; Service='Intune'; Area='Intune'; Cis='5.2.2'; Level=1
+        Name='Intune: wymaganie aktywnego antywirusa (Windows)'
+        Test={
+            try {
+                $policies = Invoke-MgGraphRequest -Method GET -Uri 'https://graph.microsoft.com/v1.0/deviceManagement/deviceCompliancePolicies' -ErrorAction Stop
+                $winPolicies = $policies.value | Where-Object { $_.'@odata.type' -match 'windows10' }
+                if (-not $winPolicies) { return New-TestResult $false 'Brak polityk zgodnosci Windows' }
+                $withAV = $winPolicies | ForEach-Object {
+                    Invoke-MgGraphRequest -Method GET -Uri "https://graph.microsoft.com/v1.0/deviceManagement/deviceCompliancePolicies/$($_.id)" -ErrorAction SilentlyContinue
+                } | Where-Object { $_.antivirusRequired -eq $true }
+                New-TestResult ($withAV.Count -gt 0) ("Polityki z antywirus: $($withAV.Count)/$($winPolicies.Count)")
+            } catch { New-TestResult $false "Blad: $_" }
+        }
+        Apply={ Write-CISLog 'INTUNE-AV-WIN: Wlacz antivirusRequired w polityce zgodnosci Windows.' WARN }
+    },
+    [pscustomobject]@{
+        Id='INTUNE-FIREWALL-WIN'; Service='Intune'; Area='Intune'; Cis='5.2.3'; Level=1
+        Name='Intune: wymaganie aktywnej zapory sieciowej (Windows)'
+        Test={
+            try {
+                $policies = Invoke-MgGraphRequest -Method GET -Uri 'https://graph.microsoft.com/v1.0/deviceManagement/deviceCompliancePolicies' -ErrorAction Stop
+                $winPolicies = $policies.value | Where-Object { $_.'@odata.type' -match 'windows10' }
+                if (-not $winPolicies) { return New-TestResult $false 'Brak polityk zgodnosci Windows' }
+                $withFW = $winPolicies | ForEach-Object {
+                    Invoke-MgGraphRequest -Method GET -Uri "https://graph.microsoft.com/v1.0/deviceManagement/deviceCompliancePolicies/$($_.id)" -ErrorAction SilentlyContinue
+                } | Where-Object { $_.firewallEnabled -eq $true }
+                New-TestResult ($withFW.Count -gt 0) ("Polityki z firewall: $($withFW.Count)/$($winPolicies.Count)")
+            } catch { New-TestResult $false "Blad: $_" }
+        }
+        Apply={ Write-CISLog 'INTUNE-FIREWALL-WIN: Wlacz firewallEnabled w polityce zgodnosci Windows.' WARN }
+    },
+    [pscustomobject]@{
+        Id='INTUNE-JAILBREAK'; Service='Intune'; Area='Intune'; Cis='5.1.1'; Level=1
+        Name='Intune: blokada urzadzen z jailbreak/root (iOS/Android)'
+        Test={
+            try {
+                $policies = Invoke-MgGraphRequest -Method GET -Uri 'https://graph.microsoft.com/v1.0/deviceManagement/deviceCompliancePolicies' -ErrorAction Stop
+                $mobilePolicies = $policies.value | Where-Object { $_.'@odata.type' -match 'ios|android' }
+                if (-not $mobilePolicies) { return New-TestResult $false 'Brak polityk zgodnosci iOS/Android w Intune' }
+                $withJB = $mobilePolicies | ForEach-Object {
+                    Invoke-MgGraphRequest -Method GET -Uri "https://graph.microsoft.com/v1.0/deviceManagement/deviceCompliancePolicies/$($_.id)" -ErrorAction SilentlyContinue
+                } | Where-Object { $_.jailBroken -eq 'blocked' -or $_.securityBlockJailbrokenDevices -eq $true }
+                New-TestResult ($withJB.Count -gt 0) ("Polityki blokujace jailbreak: $($withJB.Count)/$($mobilePolicies.Count)")
+            } catch { New-TestResult $false "Blad: $_" }
+        }
+        Apply={ Write-CISLog 'INTUNE-JAILBREAK: Wlacz blokade jailbreak w politykach zgodnosci iOS i Android.' WARN }
+    },
+    #----- PURVIEW ROZSZERZONE -----
+    [pscustomobject]@{
+        Id='PUR-DLP-TEAMS'; Service='Purview'; Area='Purview'; Cis='3.3.3'; Level=1
+        Name='Purview DLP: polityka obejmujaca czat Teams'
+        Test={
+            try {
+                $dlp = Get-DlpCompliancePolicy -ErrorAction Stop | Where-Object {
+                    $_.TeamsChannelLocation -or $_.TeamsChatsLocation
+                }
+                New-TestResult ($dlp.Count -gt 0) ("Polityki DLP z Teams: $($dlp.Count)")
+            } catch { New-TestResult $false "Blad odczytu DLP Teams: $_" }
+        }
+        Apply={
+            $name = 'CIS DLP Teams Policy'
+            if (-not (Get-DlpCompliancePolicy -Identity $name -ErrorAction SilentlyContinue)) {
+                New-DlpCompliancePolicy -Name $name -TeamsChannelLocation All -TeamsChatsLocation All -Enabled $true -ErrorAction Stop | Out-Null
+            }
+        }
+    },
+    [pscustomobject]@{
+        Id='PUR-INSIDER-RISK'; Service='Purview'; Area='Purview'; Cis='3.5.x'; Level=2
+        Name='Purview: Insider Risk Management - polityka aktywna'
+        Test={
+            try {
+                $irm = Get-InsiderRiskPolicy -ErrorAction Stop
+                New-TestResult ($irm.Count -gt 0) ("Polityki Insider Risk: $($irm.Count)")
+            } catch {
+                New-TestResult $false "Insider Risk niedostepny lub brak licencji E5/E5 Compliance: $_"
+            }
+        }
+        Apply={ Write-CISLog 'PUR-INSIDER-RISK: Skonfiguruj Insider Risk Management w Purview Compliance Portal.' WARN }
     }
 )
     return $ControlRegistry

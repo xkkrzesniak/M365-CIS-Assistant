@@ -9,7 +9,27 @@ Format: [Semantic Versioning](https://semver.org/).
 ### Planowane
 - Porównanie skanów before/after z wykresem trendu
 - Zaplanowane skany + Task Scheduler
-- Kontrolki: `TEAMS-PRESENTER`, `INTUNE-ENCRYPT`, `ENTRA-SMARTLOCKOUT`
+- Kontrolki: `TEAMS-PRESENTER`, `ENTRA-SMARTLOCKOUT`
+
+---
+
+## [1.1.0] — 2026-06-09
+### Dodano
+- **11 nowych kontrolek:**
+  - `PP-ENVCONFIG` (9.1.1 L1): Power Platform — tworzenie środowisk tylko przez adminów
+  - `PP-TRIALENV` (9.1.2 L1): Power Platform — blokada trial environments
+  - `PP-SHAREWITHTENANT` (9.1.3 L2): Power Platform — blokada udostępniania canvas app całemu tenantowi
+  - `COPILOT-PLUGINS` (1.3.1 L1): Copilot M365 — zarządzanie wtyczkami zewnętrznych wydawców
+  - `COPILOT-M365GROUPS` (1.3.2 L1): Copilot M365 — audyt przypisania licencji
+  - `INTUNE-ENCRYPT-WIN` (5.2.1 L1): Intune — BitLocker wymagany w polityce Windows
+  - `INTUNE-AV-WIN` (5.2.2 L1): Intune — antywirus wymagany (Windows)
+  - `INTUNE-FIREWALL-WIN` (5.2.3 L1): Intune — zapora sieciowa wymagana (Windows)
+  - `INTUNE-JAILBREAK` (5.1.1 L1): Intune — blokada urządzeń jailbreak/root (iOS/Android)
+  - `PUR-DLP-TEAMS` (3.3.3 L1): Purview DLP — polityka obejmująca Teams
+  - `PUR-INSIDER-RISK` (3.5 L2): Purview — Insider Risk Management
+- **Asynchroniczny skan** — DispatcherTimer procesuje jedną kontrolkę na tick (5ms); UI nie zamraża; pasek postępu `prgScan` w czasie rzeczywistym; DataGrid aktualizowany live; po wdrożeniu automatyczny reskan async
+- **Panel szczegółów** — widoczny po kliknięciu wiersza: pełna nazwa, CIS ref, poziom, opis z `$script:ControlDocs`, stan zastany; przyciski „Zaznacz do wdrożenia" / „Odznacz"
+- **Power Platform connection** — `Connect-CISServices -SkipPowerPlatform`; nowy checkbox w GUI; `$script:Ctx.Connected.PowerPlatform` inicjalizowany w `Reset-CISContext`
 
 ---
 

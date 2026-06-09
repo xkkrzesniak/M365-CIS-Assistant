@@ -323,6 +323,8 @@ $xamlText = @'
       <RowDefinition Height="Auto"/>
       <RowDefinition Height="*"/>
       <RowDefinition Height="Auto"/>
+      <RowDefinition Height="6"/>
+      <RowDefinition Height="Auto"/>
       <RowDefinition Height="160"/>
     </Grid.RowDefinitions>
 
@@ -349,7 +351,8 @@ $xamlText = @'
         <CheckBox x:Name="chkSkipSpo"     Content="Skip SharePoint"  Margin="0,0,10,0" VerticalAlignment="Center"/>
         <CheckBox x:Name="chkSkipTeams"   Content="Skip Teams"       Margin="0,0,10,0" VerticalAlignment="Center"/>
         <CheckBox x:Name="chkSkipIntune"  Content="Skip Intune"      Margin="0,0,10,0" VerticalAlignment="Center"/>
-        <CheckBox x:Name="chkSkipPurview" Content="Skip Purview"     Margin="0,0,16,0" VerticalAlignment="Center"/>
+        <CheckBox x:Name="chkSkipPurview" Content="Skip Purview"     Margin="0,0,10,0" VerticalAlignment="Center"/>
+        <CheckBox x:Name="chkSkipPP"      Content="Pomin Power Platform" Margin="0,0,16,0" VerticalAlignment="Center"/>
         <Button x:Name="btnConnect" Content="1. Polacz z tenantem" Width="170" Height="28" Background="#0b5cab" Foreground="White" FontWeight="Bold"/>
       </WrapPanel>
     </Border>
@@ -410,8 +413,35 @@ $xamlText = @'
       </DataGrid.Columns>
     </DataGrid>
 
+    <!-- Panel szczegółów kontrolki -->
+    <Border x:Name="pnlDetails" Grid.Row="4" Visibility="Collapsed" Background="#f0f6ff"
+            BorderBrush="#0b5cab" BorderThickness="0,2,0,0" Padding="12,8" Margin="0,4,0,0">
+      <Grid>
+        <Grid.ColumnDefinitions>
+          <ColumnDefinition Width="*"/>
+          <ColumnDefinition Width="210"/>
+        </Grid.ColumnDefinitions>
+        <StackPanel Grid.Column="0" Margin="0,0,12,0">
+          <TextBlock x:Name="lblDetTitle" FontWeight="Bold" FontSize="13" Foreground="#0b5cab" TextWrapping="Wrap"/>
+          <TextBlock x:Name="lblDetMeta"  Foreground="#666" FontSize="11" Margin="0,2,0,0"/>
+          <TextBlock x:Name="lblDetDesc"  TextWrapping="Wrap" Margin="0,6,0,0" FontSize="12"/>
+          <TextBlock x:Name="lblDetStan"  Foreground="#555" Margin="0,6,0,0" FontFamily="Consolas" FontSize="11" TextWrapping="Wrap"/>
+        </StackPanel>
+        <StackPanel Grid.Column="1" VerticalAlignment="Center">
+          <Button x:Name="btnDetSelect"   Content="✓ Zaznacz do wdrozenia" Height="28" Margin="0,0,0,4"
+                  Background="#1a7f37" Foreground="White" FontWeight="Bold" BorderThickness="0"/>
+          <Button x:Name="btnDetDeselect" Content="✗ Odznacz" Height="28"
+                  Background="#c0392b" Foreground="White" FontWeight="Bold" BorderThickness="0"/>
+        </StackPanel>
+      </Grid>
+    </Border>
+
+    <!-- Pasek postępu -->
+    <ProgressBar x:Name="prgScan" Grid.Row="5" Height="6" Minimum="0" Maximum="100"
+                 Value="0" Visibility="Collapsed" Foreground="#0b5cab" Background="#dde"/>
+
     <!-- Akcje -->
-    <Border Grid.Row="4" Background="White" CornerRadius="6" Padding="10" Margin="0,8,0,0" BorderBrush="#ddd" BorderThickness="1">
+    <Border Grid.Row="6" Background="White" CornerRadius="6" Padding="10" Margin="0,8,0,0" BorderBrush="#ddd" BorderThickness="1">
       <WrapPanel>
         <CheckBox x:Name="chkWhatIf" Content="WhatIf (tylko symulacja)" IsChecked="True" Margin="0,0,16,0" VerticalAlignment="Center"/>
         <Button x:Name="btnScan"   Content="2. Skanuj tenant" Width="150" Height="30" Margin="0,0,8,0" Background="#0b5cab" Foreground="White" FontWeight="Bold"/>
@@ -425,7 +455,7 @@ $xamlText = @'
     </Border>
 
     <!-- Log -->
-    <Border Grid.Row="5" Background="#1e1e1e" CornerRadius="6" Margin="0,8,0,0">
+    <Border Grid.Row="7" Background="#1e1e1e" CornerRadius="6" Margin="0,8,0,0">
       <TextBox x:Name="txtLog" Background="#1e1e1e" Foreground="#d4d4d4" FontFamily="Consolas" FontSize="11"
                IsReadOnly="True" VerticalScrollBarVisibility="Auto" TextWrapping="Wrap" BorderThickness="0" Padding="8"/>
     </Border>
@@ -439,9 +469,10 @@ $win = [Windows.Markup.XamlReader]::Load($reader)
 
 # --- Uchwyty kontrolek ---
 $ctrl = @{}
-'lblTenant','lblBg','cmbCaState','chkSkipEntra','chkSkipExo','chkSkipSpo','chkSkipTeams','chkSkipIntune','chkSkipPurview',
+'lblTenant','lblBg','cmbCaState','chkSkipEntra','chkSkipExo','chkSkipSpo','chkSkipTeams','chkSkipIntune','chkSkipPurview','chkSkipPP',
 'btnConnect','cmbLevel','cmbStatus','txtSearch','cmbProfile','btnApplyProfile','btnSaveProfile','btnSelAll',
-'btnSelNone','grid','chkWhatIf','btnScan','btnApply','btnReport','btnExportCsv','btnExportWord','btnEmail','lblStatus','txtLog' | ForEach-Object {
+'btnSelNone','grid','chkWhatIf','btnScan','btnApply','btnReport','btnExportCsv','btnExportWord','btnEmail','lblStatus','txtLog',
+'pnlDetails','prgScan','lblDetTitle','lblDetMeta','lblDetDesc','lblDetStan','btnDetSelect','btnDetDeselect' | ForEach-Object {
     $ctrl[$_] = $win.FindName($_)
 }
 $ctrl.grid.ItemsSource = $script:View
@@ -491,6 +522,7 @@ $ctrl.btnConnect.Add_Click({
         Connect-CISServices -SkipEntra:$ctrl.chkSkipEntra.IsChecked -SkipExchange:$ctrl.chkSkipExo.IsChecked `
             -SkipSharePoint:$ctrl.chkSkipSpo.IsChecked -SkipTeams:$ctrl.chkSkipTeams.IsChecked `
             -SkipIntune:$ctrl.chkSkipIntune.IsChecked -SkipPurview:$ctrl.chkSkipPurview.IsChecked `
+            -SkipPowerPlatform:$ctrl.chkSkipPP.IsChecked `
             -ConditionalAccessState $state | Out-Null
         $c = Get-CISContext
         $ctrl.lblTenant.Text = "   Tenant: " + $(if($c.TenantInitialDomain){$c.TenantInitialDomain}else{'(nieznany)'})
@@ -514,54 +546,177 @@ $ctrl.btnConnect.Add_Click({
 })
 
 $ctrl.btnScan.Add_Click({
-    try {
-        $win.Cursor='Wait'; Set-Status 'Skanowanie...'
-        $script:LastScan = Invoke-CISScan
-        $script:AllRows.Clear()
-        foreach ($r in $script:LastScan) { $script:AllRows.Add($r) }
-        # uzupelnij filtr statusu/obszaru? statusy stale; obszary dynamiczne pomijamy dla prostoty
-        Update-View
-        $ctrl.btnApply.IsEnabled = $true
-        $ctrl.btnReport.IsEnabled     = $true
-        $ctrl.btnExportCsv.IsEnabled  = $true
-        $ctrl.btnExportWord.IsEnabled = $true
-        $ctrl.btnEmail.IsEnabled      = $true
-        $total   = $script:AllRows.Count
-        $ok      = @($script:AllRows | Where-Object Status -eq 'OK').Count
-        $nok     = @($script:AllRows | Where-Object Status -eq 'NIEZGODNE').Count
-        $warn    = @($script:AllRows | Where-Object Status -eq 'WARN').Count
-        $pct     = if ($total -gt 0) { [int]([math]::Round($ok / $total * 100)) } else { 0 }
-        $scoreColor = if ($pct -ge 80) { '#27ae60' } elseif ($pct -ge 50) { '#e67e22' } else { '#c0392b' }
-        $ctrl.lblStatus.Foreground = $scoreColor
-        Set-Status ("Zgodnosc CIS: {0}% ({1}/{2} OK) | Niezgodne: {3} | Ostrzezenia: {4}" -f $pct,$ok,$total,$nok,$warn)
-    } catch {
-        [System.Windows.MessageBox]::Show($_.Exception.Message,'Blad skanu','OK','Error') | Out-Null
-        Set-Status 'Blad skanu.'
-    } finally { $win.Cursor='Arrow' }
+    # Przygotowanie
+    $ctrl.btnScan.IsEnabled  = $false
+    $ctrl.btnApply.IsEnabled = $false
+    $ctrl.prgScan.Visibility = 'Visible'
+    $ctrl.prgScan.Value      = 0
+    $script:AllRows.Clear()
+    $script:View.Clear()
+    $ctrl.lblStatus.Foreground = '#444'
+    Set-Status 'Skanowanie: pobieranie rejestru...'
+
+    $registry = @(Get-CISControlRegistry | Where-Object { (Get-CISContext).Connected[$_.Service] })
+    $total    = $registry.Count
+    if ($total -eq 0) {
+        Set-Status 'Brak kontrolek do skanowania. Sprawdz polaczenie.'
+        $ctrl.btnScan.IsEnabled = $true; $ctrl.prgScan.Visibility = 'Collapsed'; return
+    }
+
+    $scanResults = [System.Collections.Generic.List[object]]::new()
+    $scanIdx     = [ref]0
+
+    $scanTimer = [System.Windows.Threading.DispatcherTimer]::new()
+    $scanTimer.Interval = [TimeSpan]::FromMilliseconds(5)
+    $scanTimer.Add_Tick({
+        $i = $scanIdx.Value
+        if ($i -ge $total) {
+            $scanTimer.Stop()
+            $script:LastScan = $scanResults.ToArray()
+            $ctrl.btnApply.IsEnabled  = $true
+            $ctrl.btnReport.IsEnabled     = $true
+            $ctrl.btnExportCsv.IsEnabled  = $true
+            $ctrl.btnExportWord.IsEnabled = $true
+            $ctrl.btnEmail.IsEnabled      = $true
+            $ctrl.btnScan.IsEnabled   = $true
+            $ctrl.prgScan.Visibility  = 'Collapsed'
+            $ok   = @($scanResults | Where-Object Status -eq 'Zgodne').Count
+            $nok  = @($scanResults | Where-Object Status -eq 'NIEZGODNE').Count
+            $warn = @($scanResults | Where-Object Status -eq 'WARN').Count
+            $pct  = if ($total -gt 0) { [int]([math]::Round($ok / $total * 100)) } else { 0 }
+            $scoreColor = if ($pct -ge 80) { '#27ae60' } elseif ($pct -ge 50) { '#e67e22' } else { '#c0392b' }
+            $ctrl.lblStatus.Foreground = $scoreColor
+            Set-Status ("Zgodnosc CIS: {0}% ({1}/{2} OK) | Niezgodne: {3} | Ostrzezenia: {4}" -f $pct,$ok,$total,$nok,$warn)
+            return
+        }
+
+        $c = $registry[$i]
+        $status = 'Unknown'; $current = '-'
+        try {
+            $r = $c.Test.Invoke()
+            $status  = if ($r.Compliant) { 'Zgodne' } else { 'NIEZGODNE' }
+            $current = $r.Current
+        } catch { $status = 'Blad'; $current = $_.Exception.Message.Substring(0, [Math]::Min(120, $_.Exception.Message.Length)) }
+
+        $row = [pscustomobject]@{
+            Selected  = ($status -eq 'NIEZGODNE')
+            Id        = $c.Id
+            Obszar    = $c.Area
+            Kontrolka = $c.Name
+            Status    = $status
+            Poziom    = ("L{0}" -f $c.Level)
+            Level     = $c.Level
+            CIS       = $c.Cis
+            Aktualnie = $current
+        }
+        $scanResults.Add($row)
+        $script:AllRows.Add($row)
+        if (Test-RowVisible $row) { $script:View.Add($row) }
+
+        $pct2 = [int](($i + 1) / $total * 100)
+        $ctrl.prgScan.Value = $pct2
+        Set-Status ("[{0}/{1}] {2}" -f ($i + 1), $total, $c.Name)
+        $logLvl = if ($status -eq 'Zgodne') { 'OK' } elseif ($status -eq 'NIEZGODNE') { 'WARN' } else { 'ERROR' }
+        Write-CISLog ("{0,-12} L{1} {2}" -f $status, $c.Level, $c.Name) $logLvl
+
+        $scanIdx.Value = $i + 1
+    }.GetNewClosure())
+    $scanTimer.Start()
 })
 
 $ctrl.btnApply.Add_Click({
     $ids = @($script:AllRows | Where-Object Selected | Select-Object -ExpandProperty Id)
-    if ($ids.Count -eq 0) { [System.Windows.MessageBox]::Show('Nie zaznaczono zadnej kontrolki.','Info','OK','Information')|Out-Null; return }
+    if ($ids.Count -eq 0) {
+        [System.Windows.MessageBox]::Show('Nie zaznaczono zadnej kontrolki.','Info','OK','Information') | Out-Null; return
+    }
     $whatif = [bool]$ctrl.chkWhatIf.IsChecked
-    $mode = if ($whatif) { 'SYMULACJA (WhatIf)' } else { 'REALNE WDROZENIE' }
-    $r = [System.Windows.MessageBox]::Show(("Tryb: {0}`nKontrolek: {1}`n`nKontynuowac?" -f $mode,$ids.Count),'Potwierdzenie','YesNo','Question')
+    $mode   = if ($whatif) { 'SYMULACJA (WhatIf)' } else { 'REALNE WDROZENIE' }
+    $r      = [System.Windows.MessageBox]::Show(("Tryb: {0}`nKontrolek: {1}`n`nKontynuowac?" -f $mode,$ids.Count),'Potwierdzenie','YesNo','Question')
     if ($r -ne 'Yes') { return }
-    try {
-        $win.Cursor='Wait'; Set-Status "$mode..."
-        $script:LastApplied = Invoke-CISApply -Ids $ids -WhatIf:$whatif
-        # odswiez skan po wdrozeniu
-        if (-not $whatif) {
-            $script:LastScan = Invoke-CISScan
-            $script:AllRows.Clear(); foreach ($r2 in $script:LastScan) { $script:AllRows.Add($r2) }
-            Update-View
+
+    $ctrl.btnApply.IsEnabled = $false
+    $ctrl.btnScan.IsEnabled  = $false
+    $ctrl.prgScan.Visibility = 'Visible'
+    $ctrl.prgScan.Value      = 0
+    Set-Status "$mode..."
+
+    $registry     = Get-CISControlRegistry
+    $toApply      = @($ids | ForEach-Object { $id = $_; $registry | Where-Object Id -eq $id })
+    $applyTotal   = $toApply.Count
+    $applyIdx     = [ref]0
+    $applyResults = [System.Collections.Generic.List[object]]::new()
+
+    $applyTimer = [System.Windows.Threading.DispatcherTimer]::new()
+    $applyTimer.Interval = [TimeSpan]::FromMilliseconds(5)
+    $applyTimer.Add_Tick({
+        $i = $applyIdx.Value
+        if ($i -ge $applyTotal) {
+            $applyTimer.Stop()
+            $script:LastApplied = $applyResults.ToArray()
+
+            if (-not $whatif) {
+                # Reskan asynchroniczny po wdrozeniu
+                $ctrl.btnScan.IsEnabled = $false
+                $script:AllRows.Clear(); $script:View.Clear()
+                $registry2 = @(Get-CISControlRegistry | Where-Object { (Get-CISContext).Connected[$_.Service] })
+                $total2    = $registry2.Count
+                $scanR2    = [System.Collections.Generic.List[object]]::new()
+                $idx2      = [ref]0
+                $rescanT   = [System.Windows.Threading.DispatcherTimer]::new()
+                $rescanT.Interval = [TimeSpan]::FromMilliseconds(5)
+                $rescanT.Add_Tick({
+                    $j = $idx2.Value
+                    if ($j -ge $total2) {
+                        $rescanT.Stop()
+                        $script:LastScan = $scanR2.ToArray()
+                        $ctrl.btnScan.IsEnabled  = $true
+                        $ctrl.btnApply.IsEnabled = $true
+                        $ctrl.prgScan.Visibility = 'Collapsed'
+                        $ok2  = @($scanR2 | Where-Object Status -eq 'Zgodne').Count
+                        $nok2 = @($scanR2 | Where-Object Status -eq 'NIEZGODNE').Count
+                        Set-Status ("Po wdrozeniu: {0}/{1} OK, {2} niezgodne." -f $ok2,$total2,$nok2)
+                        return
+                    }
+                    $c2 = $registry2[$j]
+                    $st2 = 'Unknown'; $cur2 = '-'
+                    try { $res2=$c2.Test.Invoke(); $st2=if($res2.Compliant){'Zgodne'}else{'NIEZGODNE'}; $cur2=$res2.Current } catch { $st2='Blad'; $cur2=$_.Exception.Message }
+                    $row2 = [pscustomobject]@{ Selected=($st2-eq'NIEZGODNE'); Id=$c2.Id; Obszar=$c2.Area; Kontrolka=$c2.Name; Status=$st2; Poziom=("L{0}"-f $c2.Level); Level=$c2.Level; CIS=$c2.Cis; Aktualnie=$cur2 }
+                    $scanR2.Add($row2); $script:AllRows.Add($row2); if (Test-RowVisible $row2) { $script:View.Add($row2) }
+                    $ctrl.prgScan.Value = [int](($j+1)/$total2*100)
+                    Set-Status ("Reskan: [{0}/{1}] {2}" -f ($j+1),$total2,$c2.Name)
+                    $idx2.Value = $j + 1
+                }.GetNewClosure())
+                $rescanT.Start()
+            } else {
+                $ctrl.btnApply.IsEnabled = $true
+                $ctrl.btnScan.IsEnabled  = $true
+                $ctrl.prgScan.Visibility = 'Collapsed'
+            }
+            $ok3 = @($applyResults | Where-Object Status -eq 'APPLIED').Count
+            $er3 = @($applyResults | Where-Object Status -eq 'ERROR').Count
+            Write-CISLog ("Wdrozenie zakonczone: {0} OK, {1} bledow." -f $ok3,$er3) OK
+            return
         }
-        $ok = @($script:LastApplied | Where-Object Status -eq 'APPLIED').Count
-        $er = @($script:LastApplied | Where-Object Status -eq 'ERROR').Count
-        Set-Status ("Zakonczono: {0} OK, {1} bledow." -f $ok,$er)
-    } catch {
-        [System.Windows.MessageBox]::Show($_.Exception.Message,'Blad wdrozenia','OK','Error')|Out-Null
-    } finally { $win.Cursor='Arrow' }
+
+        $c = $toApply[$i]
+        if ($whatif) {
+            Write-CISLog ("WHATIF: {0}" -f $c.Name) SKIP
+            $applyResults.Add([pscustomobject]@{ Id=$c.Id; Name=$c.Name; Status='WHATIF'; Detail='' })
+        } else {
+            try {
+                & $c.Apply
+                Write-CISLog ("WDROZONO: {0}" -f $c.Name) OK
+                $applyResults.Add([pscustomobject]@{ Id=$c.Id; Name=$c.Name; Status='APPLIED'; Detail='' })
+            } catch {
+                Write-CISLog ("BLAD [{0}]: {1}" -f $c.Id,$_.Exception.Message) ERROR
+                $applyResults.Add([pscustomobject]@{ Id=$c.Id; Name=$c.Name; Status='ERROR'; Detail=$_.Exception.Message })
+            }
+        }
+        $ctrl.prgScan.Value = [int](($i+1)/$applyTotal*100)
+        Set-Status ("{0}: [{1}/{2}] {3}" -f $mode, ($i+1), $applyTotal, $c.Name)
+        $applyIdx.Value = $i + 1
+    }.GetNewClosure())
+    $applyTimer.Start()
 })
 
 $ctrl.btnReport.Add_Click({
@@ -643,6 +798,29 @@ $ctrl.btnSaveProfile.Add_Click({
 
 $ctrl.btnSelAll.Add_Click({  foreach ($r in $script:View) { $r.Selected=$true };  Update-View })
 $ctrl.btnSelNone.Add_Click({ foreach ($r in $script:View) { $r.Selected=$false }; Update-View })
+
+# --- Panel szczegółów ---
+$ctrl.grid.Add_SelectionChanged({
+    $item = $ctrl.grid.SelectedItem
+    if (-not $item) { $ctrl.pnlDetails.Visibility = 'Collapsed'; return }
+    $ctrl.pnlDetails.Visibility = 'Visible'
+    $ctrl.lblDetTitle.Text = "$($item.Id)  —  $($item.Kontrolka)"
+    $ctrl.lblDetMeta.Text  = "CIS $($item.CIS)  |  $($item.Poziom)  |  Obszar: $($item.Obszar)  |  Status: $($item.Status)"
+    $desc = (Get-CISControlDocs)[$item.Id]; if (-not $desc) { $desc = '(brak opisu — dodaj do $script:ControlDocs w M365CISCore.psm1)' }
+    $ctrl.lblDetDesc.Text  = $desc
+    $ctrl.lblDetStan.Text  = "Stan zastany: $($item.Aktualnie)"
+})
+
+$ctrl.btnDetSelect.Add_Click({
+    $item = $ctrl.grid.SelectedItem
+    if ($item) { $item.Selected = $true; $ctrl.grid.Items.Refresh() }
+})
+
+$ctrl.btnDetDeselect.Add_Click({
+    $item = $ctrl.grid.SelectedItem
+    if ($item) { $item.Selected = $false; $ctrl.grid.Items.Refresh() }
+})
+
 $ctrl.cmbLevel.Add_SelectionChanged({ Update-View })
 $ctrl.cmbStatus.Add_SelectionChanged({ Update-View })
 $ctrl.txtSearch.Add_TextChanged({ Update-View })
