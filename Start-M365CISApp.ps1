@@ -450,6 +450,8 @@ $xamlText = @'
         <Button x:Name="btnExportCsv"  Content="Eksportuj CSV"      Width="110" Height="30" Margin="0,0,4,0" IsEnabled="False"/>
         <Button x:Name="btnExportWord" Content="Eksportuj Word/PDF"  Width="130" Height="30" Margin="0,0,4,0" IsEnabled="False"/>
         <Button x:Name="btnEmail"      Content="Wyslij e-mail"       Width="110" Height="30" Margin="0,0,16,0" IsEnabled="False"/>
+        <Button x:Name="btnWizard"     Content="★ Kreator Start Tenant" Width="190" Height="30" Margin="0,0,8,0"
+                Background="#6f42c1" Foreground="White" FontWeight="Bold" IsEnabled="False"/>
         <TextBlock x:Name="lblStatus" Text="Gotowy." VerticalAlignment="Center" Foreground="#444"/>
       </WrapPanel>
     </Border>
@@ -471,7 +473,7 @@ $win = [Windows.Markup.XamlReader]::Load($reader)
 $ctrl = @{}
 'lblTenant','lblBg','cmbCaState','chkSkipEntra','chkSkipExo','chkSkipSpo','chkSkipTeams','chkSkipIntune','chkSkipPurview','chkSkipPP',
 'btnConnect','cmbLevel','cmbStatus','txtSearch','cmbProfile','btnApplyProfile','btnSaveProfile','btnSelAll',
-'btnSelNone','grid','chkWhatIf','btnScan','btnApply','btnReport','btnExportCsv','btnExportWord','btnEmail','lblStatus','txtLog',
+'btnSelNone','grid','chkWhatIf','btnScan','btnApply','btnReport','btnExportCsv','btnExportWord','btnEmail','btnWizard','lblStatus','txtLog',
 'pnlDetails','prgScan','lblDetTitle','lblDetMeta','lblDetDesc','lblDetStan','btnDetSelect','btnDetDeselect' | ForEach-Object {
     $ctrl[$_] = $win.FindName($_)
 }
@@ -545,6 +547,342 @@ $ctrl.btnConnect.Add_Click({
     } finally { $win.Cursor='Arrow' }
 })
 
+# ============================================================
+# KREATOR START TENANT — 5-krokowy asystent konfiguracji
+# ============================================================
+function Show-StartTenantWizard {
+    param([object[]]$LastScan, $OwnerWindow)
+
+    if (-not $LastScan -or $LastScan.Count -eq 0) {
+        [System.Windows.MessageBox]::Show(
+            'Najpierw wykonaj skan tenanta (krok: 2. Skanuj tenant), a następnie uruchom Kreatora.',
+            'Kreator Start Tenant','OK','Information') | Out-Null
+        return
+    }
+
+    # Cały stan kreatora w hashtable — dostępny przez GetNewClosure() (reference type)
+    $state = @{
+        Step   = 0
+        Scan   = $LastScan
+        Sel    = [System.Collections.Generic.Dictionary[string,bool]]::new()
+        Steps  = @(
+            @{ T='Krok 1/5: Tożsamość i Entra ID';         A=@('Entra ID','Copilot');           D='Conditional Access, MFA, uprawnienia użytkowników, konsent aplikacji, konta administratorów.' }
+            @{ T='Krok 2/5: Exchange Online & Defender';   A=@('Exchange','Defender','Email-Auth'); D='Antyspam, anti-phishing, Safe Attachments, DKIM, protokoły poczty.' }
+            @{ T='Krok 3/5: SharePoint Online & OneDrive'; A=@('SharePoint');                   D='Zewnętrzne udostępnianie, typy linków, goście, urządzenia niezarządzane.' }
+            @{ T='Krok 4/5: Microsoft Teams';              A=@('Teams');                        D='Dostęp zewnętrzny, goście, spotkania, lobby, nagrywanie, bezpieczeństwo czatu.' }
+            @{ T='Krok 5/5: Podsumowanie i wdrożenie';    A=@();                               D='Przejrzyj wybrane poprawki i kliknij Wdróż, aby zastosować je w tenancie.' }
+        )
+    }
+
+    # Pre-zaznacz wszystkie NIEZGODNE
+    foreach ($row in $LastScan) {
+        if ($row.Status -eq 'NIEZGODNE') { $state.Sel[$row.Id] = $true }
+    }
+
+    $wizXaml = @'
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Kreator Start Tenant — M365 CIS Assistant"
+        Width="860" Height="680" MinWidth="640" MinHeight="500"
+        WindowStartupLocation="CenterOwner" ResizeMode="CanResize"
+        FontFamily="Segoe UI" FontSize="13" Background="#f4f6f9">
+  <Grid>
+    <Grid.RowDefinitions>
+      <RowDefinition Height="64"/>
+      <RowDefinition Height="52"/>
+      <RowDefinition Height="*"/>
+      <RowDefinition Height="66"/>
+    </Grid.RowDefinitions>
+
+    <Border Grid.Row="0" Background="#0b5cab">
+      <Grid Margin="20,0">
+        <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+        <StackPanel VerticalAlignment="Center">
+          <TextBlock x:Name="lblWTitle" Text="Kreator Start Tenant" Foreground="White" FontSize="15" FontWeight="Bold"/>
+          <TextBlock x:Name="lblWDesc"  Text="" Foreground="#c5dcf0" FontSize="11" TextWrapping="Wrap"/>
+        </StackPanel>
+        <TextBlock Grid.Column="1" x:Name="lblWCount" Text="" Foreground="#c5dcf0" VerticalAlignment="Center" FontSize="13"/>
+      </Grid>
+    </Border>
+
+    <Border Grid.Row="1" Background="White" BorderBrush="#ddd" BorderThickness="0,0,0,1">
+      <StackPanel x:Name="stkSteps" Orientation="Horizontal" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+    </Border>
+
+    <ScrollViewer Grid.Row="2" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+      <StackPanel x:Name="stkContent" Margin="20,14,20,8"/>
+    </ScrollViewer>
+
+    <Border Grid.Row="3" Background="White" BorderBrush="#ddd" BorderThickness="0,1,0,0">
+      <Grid Margin="20,0">
+        <Grid.ColumnDefinitions>
+          <ColumnDefinition Width="Auto"/>
+          <ColumnDefinition Width="*"/>
+          <ColumnDefinition Width="Auto"/>
+          <ColumnDefinition Width="Auto"/>
+        </Grid.ColumnDefinitions>
+        <Button x:Name="btnWBack"  Grid.Column="0" Content="← Wstecz"           Width="110" Height="36" IsEnabled="False" VerticalAlignment="Center"/>
+        <TextBlock x:Name="lblWNav" Grid.Column="1" Text="" VerticalAlignment="Center" Margin="14,0" Foreground="#555" FontSize="12" TextWrapping="Wrap"/>
+        <Button x:Name="btnWNext"  Grid.Column="2" Content="Dalej →"            Width="110" Height="36" Margin="0,0,8,0" VerticalAlignment="Center"/>
+        <Button x:Name="btnWApply" Grid.Column="3" Content="Wdroz zaznaczone ✓" Width="190" Height="36"
+                Background="#1a7f37" Foreground="White" FontWeight="Bold" VerticalAlignment="Center" Visibility="Collapsed"/>
+      </Grid>
+    </Border>
+  </Grid>
+</Window>
+'@
+
+    [xml]$wx = $wizXaml
+    $wWin = [Windows.Markup.XamlReader]::Load((New-Object System.Xml.XmlNodeReader $wx))
+    if ($OwnerWindow) { $wWin.Owner = $OwnerWindow }
+
+    $wc = @{}
+    'lblWTitle','lblWDesc','lblWCount','stkSteps','stkContent','btnWBack','btnWNext','btnWApply','lblWNav' |
+        ForEach-Object { $wc[$_] = $wWin.FindName($_) }
+
+    # Helper: pasek kroków
+    $buildSteps = {
+        $wc.stkSteps.Children.Clear()
+        for ($s = 0; $s -lt $state.Steps.Count; $s++) {
+            $b = New-Object System.Windows.Controls.Border
+            $b.Width = 30; $b.Height = 30
+            $b.CornerRadius = New-Object System.Windows.CornerRadius 15
+            $b.Margin = New-Object System.Windows.Thickness 4,0,4,0
+            $t = New-Object System.Windows.Controls.TextBlock
+            $t.HorizontalAlignment = 'Center'; $t.VerticalAlignment = 'Center'
+            $t.FontWeight = 'Bold'
+            if ($s -lt $state.Step) {
+                $b.Background = [System.Windows.Media.Brushes]::SeaGreen
+                $t.Foreground = [System.Windows.Media.Brushes]::White; $t.Text = [char]0x2713
+            } elseif ($s -eq $state.Step) {
+                $b.Background = [System.Windows.Media.Brushes]::DodgerBlue
+                $t.Foreground = [System.Windows.Media.Brushes]::White; $t.Text = ($s+1).ToString()
+            } else {
+                $b.Background = [System.Windows.Media.Brushes]::LightGray
+                $t.Foreground = [System.Windows.Media.Brushes]::Gray; $t.Text = ($s+1).ToString()
+            }
+            $b.Child = $t
+            $wc.stkSteps.Children.Add($b) | Out-Null
+            if ($s -lt $state.Steps.Count - 1) {
+                $sep = New-Object System.Windows.Controls.TextBlock
+                $sep.Text = [string][char]0x2014  # em-dash
+                $sep.Foreground = [System.Windows.Media.Brushes]::LightGray
+                $sep.VerticalAlignment = 'Center'; $sep.Margin = New-Object System.Windows.Thickness 2,0,2,0
+                $wc.stkSteps.Children.Add($sep) | Out-Null
+            }
+        }
+    }.GetNewClosure()
+
+    # Helper: karta kontrolki
+    $makeCard = {
+        param($row, $isFixable)
+        $card = New-Object System.Windows.Controls.Border
+        $card.Margin = New-Object System.Windows.Thickness 0,3,0,3
+        $card.Padding = New-Object System.Windows.Thickness 10,7,10,7
+        $card.CornerRadius = New-Object System.Windows.CornerRadius 5
+        $card.Background = [System.Windows.Media.Brushes]::White
+        $bCol = if ($row.Status -eq 'NIEZGODNE') { '#f5c6cb' } elseif ($row.Status -eq 'WARN') { '#ffeeba' } else { '#c3e6cb' }
+        $card.BorderBrush = [System.Windows.Media.SolidColorBrush][System.Windows.Media.ColorConverter]::ConvertFromString($bCol)
+        $card.BorderThickness = New-Object System.Windows.Thickness 1
+
+        $g = New-Object System.Windows.Controls.Grid
+        $c0 = New-Object System.Windows.Controls.ColumnDefinition; $c0.Width = [System.Windows.GridLength]::Auto
+        $c1 = New-Object System.Windows.Controls.ColumnDefinition; $c1.Width = New-Object System.Windows.GridLength 1,[System.Windows.GridUnitType]::Star
+        $g.ColumnDefinitions.Add($c0) | Out-Null; $g.ColumnDefinitions.Add($c1) | Out-Null
+
+        $chk = New-Object System.Windows.Controls.CheckBox
+        $chk.VerticalAlignment = 'Top'
+        $chk.Margin = New-Object System.Windows.Thickness 0,1,10,0
+        $chk.IsEnabled = [bool]$isFixable
+        $chk.IsChecked = $state.Sel.ContainsKey($row.Id) -and $state.Sel[$row.Id]
+
+        # GetNewClosure() frozne referencje do $state (hashtable) i $rowId (string)
+        $rowData = @{ Id = $row.Id; Sel = $state.Sel }
+        $chk.Add_Checked({   $rowData.Sel[$rowData.Id] = $true  }.GetNewClosure())
+        $chk.Add_Unchecked({ $rowData.Sel[$rowData.Id] = $false }.GetNewClosure())
+
+        [System.Windows.Controls.Grid]::SetColumn($chk, 0)
+        $g.Children.Add($chk) | Out-Null
+
+        $sp = New-Object System.Windows.Controls.StackPanel
+        [System.Windows.Controls.Grid]::SetColumn($sp, 1)
+
+        $tn = New-Object System.Windows.Controls.TextBlock
+        $tn.Text = $row.Kontrolka; $tn.FontWeight = 'SemiBold'; $tn.TextWrapping = 'Wrap'
+        $sp.Children.Add($tn) | Out-Null
+
+        $tm = New-Object System.Windows.Controls.TextBlock
+        $tm.Text = "$($row.Id)  |  CIS $($row.CIS)  |  $($row.Poziom)  |  $($row.Aktualnie)"
+        $tm.FontSize = 10; $tm.Foreground = [System.Windows.Media.Brushes]::Gray; $tm.TextWrapping = 'Wrap'
+        $sp.Children.Add($tm) | Out-Null
+
+        $docs = (Get-CISControlDocs)[$row.Id]
+        if ($docs) {
+            $td = New-Object System.Windows.Controls.TextBlock
+            $td.Text = $docs; $td.FontSize = 11; $td.TextWrapping = 'Wrap'
+            $td.Margin = New-Object System.Windows.Thickness 0,2,0,0
+            $td.Foreground = [System.Windows.Media.SolidColorBrush][System.Windows.Media.ColorConverter]::ConvertFromString('#444')
+            $sp.Children.Add($td) | Out-Null
+        }
+
+        $g.Children.Add($sp) | Out-Null
+        $card.Child = $g
+        return $card
+    }.GetNewClosure()
+
+    # Główny renderer strony
+    $renderPage = {
+        $s    = $state.Step
+        $step = $state.Steps[$s]
+        $wc.lblWTitle.Text = $step.T
+        $wc.lblWDesc.Text  = $step.D
+        $wc.stkContent.Children.Clear()
+
+        $wc.btnWBack.IsEnabled = ($s -gt 0)
+        $wc.btnWNext.Visibility  = if ($s -lt 4) { 'Visible' }   else { 'Collapsed' }
+        $wc.btnWApply.Visibility = if ($s -eq 4) { 'Visible' }   else { 'Collapsed' }
+
+        & $buildSteps
+
+        if ($s -lt 4) {
+            # Strony 1-4: lista kontrolek z obszaru
+            $areas = $step.A
+            $rows  = @($state.Scan | Where-Object { $areas -contains $_.Obszar })
+            $nok   = @($rows | Where-Object Status -eq 'NIEZGODNE')
+            $ok    = @($rows | Where-Object Status -eq 'Zgodne')
+            $other = @($rows | Where-Object { $_.Status -ne 'NIEZGODNE' -and $_.Status -ne 'Zgodne' })
+
+            $wc.lblWCount.Text = "Do naprawy: $($nok.Count) | OK: $($ok.Count)"
+
+            if ($rows.Count -eq 0) {
+                $t = New-Object System.Windows.Controls.TextBlock
+                $t.Text = 'Brak kontrolek dla tej usługi lub usługa nie jest połączona.'
+                $t.Foreground = [System.Windows.Media.Brushes]::Gray; $t.TextWrapping = 'Wrap'; $t.Margin = New-Object System.Windows.Thickness 0,16,0,0
+                $wc.stkContent.Children.Add($t) | Out-Null
+            }
+
+            $groups = @(
+                @{ L='NIEZGODNE — wymagają naprawy'; C='#b42318'; Rows=$nok;   Fix=$true  }
+                @{ L='Inne / Błędy';                 C='#666';    Rows=$other; Fix=$false }
+                @{ L='Zgodne (OK)';                  C='#1a7f37'; Rows=$ok;    Fix=$false }
+            )
+
+            foreach ($grp in $groups) {
+                if ($grp.Rows.Count -eq 0) { continue }
+                $h = New-Object System.Windows.Controls.TextBlock
+                $h.Text = "$($grp.L) ($($grp.Rows.Count))"
+                $h.FontWeight = 'Bold'; $h.FontSize = 11
+                $h.Margin = New-Object System.Windows.Thickness 0,10,0,3
+                $h.Foreground = [System.Windows.Media.SolidColorBrush][System.Windows.Media.ColorConverter]::ConvertFromString($grp.C)
+                $wc.stkContent.Children.Add($h) | Out-Null
+
+                foreach ($row in $grp.Rows) {
+                    $card = & $makeCard $row $grp.Fix
+                    $wc.stkContent.Children.Add($card) | Out-Null
+                }
+            }
+
+            $selInStep = @($nok | Where-Object { $state.Sel.ContainsKey($_.Id) -and $state.Sel[$_.Id] }).Count
+            $wc.lblWNav.Text = if ($nok.Count -gt 0) {
+                "Zaznaczono $selInStep z $($nok.Count) poprawek w tej sekcji. Odznacz te, których nie chcesz wdrożyć."
+            } else { 'Wszystkie kontrolki w tej sekcji są zgodne.' }
+
+        } else {
+            # Strona 5: podsumowanie
+            $selIds = @($state.Sel.Keys | Where-Object { $state.Sel[$_] })
+            $wc.lblWCount.Text = "Wybrano: $($selIds.Count) poprawek"
+            $wc.btnWApply.IsEnabled = ($selIds.Count -gt 0)
+
+            if ($selIds.Count -eq 0) {
+                $t = New-Object System.Windows.Controls.TextBlock
+                $t.Text = 'Nie wybrano żadnych poprawek. Wróć do poprzednich kroków i zaznacz kontrolki, które chcesz wdrożyć.'
+                $t.Foreground = [System.Windows.Media.Brushes]::Gray; $t.TextWrapping = 'Wrap'; $t.Margin = New-Object System.Windows.Thickness 0,16,0,0
+                $wc.stkContent.Children.Add($t) | Out-Null
+            } else {
+                $hdr = New-Object System.Windows.Controls.TextBlock
+                $hdr.Text = "Następujące $($selIds.Count) poprawek zostanie wdrożonych w tenancie:"
+                $hdr.FontWeight = 'Bold'; $hdr.Margin = New-Object System.Windows.Thickness 0,0,0,10; $hdr.TextWrapping = 'Wrap'
+                $wc.stkContent.Children.Add($hdr) | Out-Null
+
+                # Grupuj po obszarze
+                $byArea = $selIds | ForEach-Object {
+                    $r = $state.Scan | Where-Object Id -eq $_ | Select-Object -First 1
+                    if ($r) { $r }
+                } | Where-Object { $_ } | Sort-Object Obszar, Id
+
+                foreach ($row in $byArea) {
+                    $b = New-Object System.Windows.Controls.Border
+                    $b.Margin = New-Object System.Windows.Thickness 0,2,0,2
+                    $b.Padding = New-Object System.Windows.Thickness 10,6,10,6
+                    $b.CornerRadius = New-Object System.Windows.CornerRadius 4
+                    $b.Background = [System.Windows.Media.SolidColorBrush][System.Windows.Media.ColorConverter]::ConvertFromString('#fff3cd')
+                    $b.BorderBrush = [System.Windows.Media.SolidColorBrush][System.Windows.Media.ColorConverter]::ConvertFromString('#ffc107')
+                    $b.BorderThickness = New-Object System.Windows.Thickness 1
+                    $t2 = New-Object System.Windows.Controls.TextBlock
+                    $t2.Text = "[$($row.Obszar)]  $($row.Kontrolka)  [CIS $($row.CIS)  $($row.Poziom)]"
+                    $t2.TextWrapping = 'Wrap'; $t2.FontSize = 12
+                    $b.Child = $t2
+                    $wc.stkContent.Children.Add($b) | Out-Null
+                }
+            }
+            $wc.lblWNav.Text = if ($selIds.Count -gt 0) {
+                "Kliknij 'Wdroz zaznaczone' aby zastosować $($selIds.Count) poprawek. Wyniki pojawią się w logu głównym okna."
+            } else { 'Brak wybranych poprawek.' }
+        }
+    }.GetNewClosure()
+
+    # Nawigacja
+    $wc.btnWNext.Add_Click({
+        if ($state.Step -lt 4) { $state.Step++; & $renderPage }
+    }.GetNewClosure())
+
+    $wc.btnWBack.Add_Click({
+        if ($state.Step -gt 0) { $state.Step--; & $renderPage }
+    }.GetNewClosure())
+
+    # Wdrożenie
+    $wc.btnWApply.Add_Click({
+        $selIds = @($state.Sel.Keys | Where-Object { $state.Sel[$_] })
+        if ($selIds.Count -eq 0) { return }
+
+        $confirm = [System.Windows.MessageBox]::Show(
+            "Zostaną wdrożone $($selIds.Count) poprawek w tenancie.`n`nKontynuować?",
+            'Kreator — Wdrożenie', 'YesNo', 'Question')
+        if ($confirm -ne 'Yes') { return }
+
+        $wc.btnWApply.IsEnabled = $false
+        $wc.btnWApply.Content   = 'Wdrażanie...'
+        $wWin.Cursor = 'Wait'
+
+        $reg = Get-CISControlRegistry
+        $okCnt = 0; $errCnt = 0
+
+        foreach ($id in $selIds) {
+            $c = $reg | Where-Object Id -eq $id | Select-Object -First 1
+            if (-not $c) { continue }
+            try {
+                & $c.Apply
+                Write-CISLog "KREATOR WDROZONO: $id" OK
+                $okCnt++
+            } catch {
+                Write-CISLog "KREATOR BLAD [$id]: $($_.Exception.Message)" ERROR
+                $errCnt++
+            }
+        }
+
+        $wWin.Cursor = 'Arrow'
+        [System.Windows.MessageBox]::Show(
+            "Wdrożenie zakończone!`n`nWdrożono poprawnie:  $okCnt`nBłędy:               $errCnt`n`nUruchom ponownie skan (2. Skanuj tenant) aby zobaczyć zaktualizowany wynik zgodności.",
+            'Kreator — Wyniki', 'OK', 'Information') | Out-Null
+
+        $wWin.Close()
+    }.GetNewClosure())
+
+    # Pierwsze renderowanie
+    & $renderPage
+    $wWin.ShowDialog() | Out-Null
+}
+
 $ctrl.btnScan.Add_Click({
     $ctrl.btnScan.IsEnabled  = $false
     $ctrl.btnApply.IsEnabled = $false
@@ -577,6 +915,7 @@ $ctrl.btnScan.Add_Click({
             $ctrl.btnExportCsv.IsEnabled  = $true
             $ctrl.btnExportWord.IsEnabled = $true
             $ctrl.btnEmail.IsEnabled      = $true
+            $ctrl.btnWizard.IsEnabled     = $true
             $ctrl.btnScan.IsEnabled       = $true
             $ctrl.prgScan.Visibility      = 'Collapsed'
             $ok   = @($script:_ScanResults | Where-Object Status -eq 'Zgodne').Count
@@ -664,6 +1003,7 @@ $ctrl.btnApply.Add_Click({
                         $ctrl.btnExportCsv.IsEnabled   = $true
                         $ctrl.btnExportWord.IsEnabled  = $true
                         $ctrl.btnEmail.IsEnabled        = $true
+                        $ctrl.btnWizard.IsEnabled       = $true
                         $ctrl.prgScan.Visibility       = 'Collapsed'
                         $ok2  = @($script:_ScanResults | Where-Object Status -eq 'Zgodne').Count
                         $nok2 = @($script:_ScanResults | Where-Object Status -eq 'NIEZGODNE').Count
@@ -811,6 +1151,10 @@ $ctrl.btnDetSelect.Add_Click({
 $ctrl.btnDetDeselect.Add_Click({
     $item = $ctrl.grid.SelectedItem
     if ($item) { $item.Selected = $false; $ctrl.grid.Items.Refresh() }
+})
+
+$ctrl.btnWizard.Add_Click({
+    Show-StartTenantWizard -LastScan $script:LastScan -OwnerWindow $win
 })
 
 $ctrl.cmbLevel.Add_SelectionChanged({ Update-View })

@@ -9,7 +9,32 @@ Format: [Semantic Versioning](https://semver.org/).
 ### Planowane
 - Porównanie skanów before/after z wykresem trendu
 - Zaplanowane skany + Task Scheduler
+- Integracja z Maester (opcjonalny backend skanu)
 - Kontrolki: `TEAMS-PRESENTER`, `ENTRA-SMARTLOCKOUT`
+
+---
+
+## [1.2.0] — 2026-06-10
+### Dodano
+- **Kreator Start Tenant** (przycisk `★ Kreator Start Tenant`): 5-krokowy kreator WPF dla nowych tenantów — grupuje wyniki skanu wg obszaru (Entra ID → Exchange/MDO → SharePoint → Teams → Podsumowanie), pokazuje szczegółowe opisy z ControlDocs, checkboxy do wyboru poprawek, jedno kliknięcie `Wdroz zaznaczone` aplikuje wszystkie zaznaczone kontrolki jednocześnie. Pre-zaznaczone wszystkie NIEZGODNE.
+- **15 nowych kontrolek** (zainspirowanych Maester/ORCA/EIDSCA):
+  - `ENTRA-GA-COUNT` (CIS 1.1.1 L1): liczba Global Adminów w zakresie 2-4
+  - `ENTRA-CA-RISK-USER` (CIS 1.2.4 L2): CA blokuje użytkowników wysokiego ryzyka (Identity Protection)
+  - `ENTRA-CA-RISK-SIGNIN` (CIS 1.2.3 L2): CA wymaga MFA dla ryzykownych logowań
+  - `ENTRA-AUTHFIDO2` (L1): metoda FIDO2/Passkeys włączona w Authentication Methods Policy
+  - `MDO-PHISH-THRESHOLD` (ORCA 101 / CIS 2.1.4 L1): PhishThresholdLevel ≥3 (Aggressive)
+  - `MDO-DMARC-POLICY` (CIS 2.1.x L1): HonorDmarcPolicy=true — respektowanie DMARC p=reject
+  - `MDO-BULK-THRESHOLD` (ORCA / CIS 2.1.5 L1): BCL ≤6 w polityce antyspam
+  - `MDO-QUARANTINE-NOTIFY` (ORCA L1): ESN — powiadomienia kwarantanny dla użytkowników
+  - `MDO-MAILBOX-INTEL` (ORCA / CIS 2.1.4 L1): Mailbox Intelligence + IntelligenceProtection=Quarantine
+  - `EXO-BYPASS-RULES` (CIS 6.x L1): audyt reguł transportu z SCL=-1 omijających spam
+  - `EXO-CONNECTORS-TLS` (CIS 6.x L1): aktywne connectory przychodzące wymagają TLS
+  - `SPO-DEFAULT-LINK` (CIS 7.2.3 L1): DefaultSharingLinkType=Direct (tylko konkretne osoby)
+  - `SPO-LINK-PERMISSION` (CIS 7.2.4 L1): DefaultLinkPermission=View
+  - `TEAMS-LOBBY` (CIS 8.1.1 L1): AutoAdmittedUsers=EveryoneInCompanyExcludingGuests
+  - `TEAMS-PSTN-LOBBY` (CIS 8.1.2 L1): AllowPSTNUsersToBypassLobby=false
+- Łącznie: **78 kontrolek** (było 63)
+- Przycisk `btnWizard` aktywowany po każdym skanie (zarówno głównym jak i po reskan po wdrożeniu)
 
 ---
 

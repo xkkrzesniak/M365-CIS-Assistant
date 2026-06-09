@@ -666,6 +666,21 @@ $script:ControlDocs = @{
     'INTUNE-JAILBREAK'           = 'Intune: blokada urządzeń mobilnych z jailbreak (iOS) lub root (Android). Takie urządzenia omijają kontrole bezpieczeństwa systemu. CIS 5.1.1 L1.'
     'PUR-DLP-TEAMS'              = 'Purview DLP: polityka zapobiegania utracie danych obejmująca czat i kanały Teams. Zapobiega udostępnianiu poufnych informacji przez Teams. CIS 3.3.3 L1.'
     'PUR-INSIDER-RISK'           = 'Purview Insider Risk Management: aktywna polityka wykrywająca podejrzane działania wewnętrzne (wycieki danych, sabotaż). Wymaga licencji E5 Compliance. CIS 3.5 L2.'
+    'ENTRA-GA-COUNT'             = 'Liczba Global Administratorów w zakresie 2-4 kont. Mniej niż 2 = brak zapasu przy awarii. Więcej niż 4 = zbyt duża powierzchnia ataku. Maester: CIS.M365.1.1.1.'
+    'ENTRA-CA-RISK-USER'         = 'Polityka Conditional Access blokująca użytkowników oznaczonych jako wysokie ryzyko przez Entra ID Identity Protection. Wymaga licencji Entra ID P2. CIS 1.2.4 L2.'
+    'ENTRA-CA-RISK-SIGNIN'       = 'Polityka Conditional Access wymagająca MFA dla logowań o średnim lub wysokim ryzyku wg Identity Protection. Zatrzymuje ataki credential stuffing. CIS 1.2.3 L2.'
+    'ENTRA-AUTHFIDO2'            = 'Metoda uwierzytelniania FIDO2 (passkeys, klucze sprzętowe YubiKey) włączona w Authentication Methods Policy. Silniejsza niż TOTP, odporna na phishing.'
+    'MDO-PHISH-THRESHOLD'        = 'PhishThresholdLevel=3 (Aggressive) w domyślnej polityce anti-phishing. Wyższy próg = więcej wiadomości traktowanych jako phishing. ORCA 101, CIS 2.1.4.'
+    'MDO-DMARC-POLICY'           = 'HonorDmarcPolicy=true: MDO respektuje politykę DMARC p=reject/quarantine. Blokuje e-maile podszywające się pod domeny z opublikowanym DMARC. CIS 2.1.x.'
+    'MDO-BULK-THRESHOLD'         = 'BulkThreshold≤6: wiadomości masowe (BCL≥6) trafiają do spamu lub kwarantanny. Ogranicza komercyjne maile masowe. ORCA, CIS 2.1.5.'
+    'MDO-QUARANTINE-NOTIFY'      = 'ESNEnabled=true: użytkownicy otrzymują codzienne powiadomienia o wiadomościach w kwarantannie. Mogą samodzielnie zgłosić false positive. ORCA, CIS 2.1.x.'
+    'MDO-MAILBOX-INTEL'          = 'Mailbox Intelligence + IntelligenceProtection włączone: MDO analizuje historię korespondencji i blokuje próby personifikacji nadawcy. Akcja: Quarantine. ORCA.'
+    'EXO-BYPASS-RULES'           = 'Audyt: brak aktywnych reguł transportu z SetSCL=-1. Takie reguły pomijają filtrowanie spamu i mogą być nadużywane przez atakujących. Wymaga ręcznego przeglądu w EAC.'
+    'EXO-CONNECTORS-TLS'         = 'Wszystkie aktywne connectory przychodzące (inbound connectors) wymagają szyfrowania TLS. Zapobiega przechwyceniu poczty w transmisji.'
+    'SPO-DEFAULT-LINK'           = 'DefaultSharingLinkType=Direct: domyślny link udostępniania tworzy link "tylko konkretne osoby" zamiast "każdy z linkiem". Bezpieczniejszy domyślnie. CIS 7.2.3.'
+    'SPO-LINK-PERMISSION'        = 'DefaultLinkPermission=View: domyślne uprawnienie linku = podgląd (nie edycja). Użytkownik musi świadomie wybrać "Edytuj" przy udostępnianiu. CIS 7.2.4.'
+    'TEAMS-LOBBY'                = 'AutoAdmittedUsers=EveryoneInCompanyExcludingGuests: goście i zewnętrzni są zatrzymywani w lobby. Organizator musi ich wpuścić. CIS 8.1.1.'
+    'TEAMS-PSTN-LOBBY'           = 'AllowPSTNUsersToBypassLobby=false: osoby dzwoniące przez telefon (PSTN) muszą przejść przez lobby — nie dołączają automatycznie do spotkania. CIS 8.1.2.'
 }
 
 # ---------- RAPORT HTML ----------
@@ -1692,6 +1707,300 @@ $ControlRegistry = @(
             }
         }
         Apply={ Write-CISLog 'PUR-INSIDER-RISK: Skonfiguruj Insider Risk Management w Purview Compliance Portal.' WARN }
+    }
+
+    # ---- ENTRA: Global Admin count (Maester CIS.M365.1.1.1) ----
+    @{
+        Id='ENTRA-GA-COUNT'; Service='Graph'; Area='Entra ID'; Cis='1.1.1'; Level=1
+        Name='Entra: liczba Global Adminow w zakresie 2-4 (CIS 1.1.1)'
+        Test={
+            try {
+                $gaId = '62e90394-69f5-4237-9190-012177145e10'
+                $role = Get-MgDirectoryRole -All -ErrorAction Stop | Where-Object RoleTemplateId -eq $gaId
+                $cnt  = if ($role) { @(Get-MgDirectoryRoleMember -DirectoryRoleId $role.Id -All -ErrorAction SilentlyContinue).Count } else { 0 }
+                New-TestResult ($cnt -ge 2 -and $cnt -le 4) "Global Adminow: $cnt (zalecane 2-4)"
+            } catch { New-TestResult $false "Blad: $_" }
+        }
+        Apply={ Write-CISLog 'ENTRA-GA-COUNT: Dostosuj recznie liczbe Global Adminow (zalecane 2-4) w Entra ID > Roles > Global Administrator.' WARN }
+    }
+
+    # ---- ENTRA: CA policy — block high-risk users ----
+    @{
+        Id='ENTRA-CA-RISK-USER'; Service='Graph'; Area='Entra ID'; Cis='1.2.4'; Level=2
+        Name='CA: blokuj uzytkownikow wysokiego ryzyka Identity Protection (CIS 1.2.4)'
+        Test={
+            try {
+                $caps = (Invoke-MgGraphRequest -Method GET -Uri 'https://graph.microsoft.com/v1.0/identity/conditionalAccess/policies').value
+                $pol  = $caps | Where-Object {
+                    ($_.state -eq 'enabled' -or $_.state -eq 'enabledForReportingButNotEnforced') -and
+                    ($_.conditions.userRiskLevels -contains 'high')
+                } | Select-Object -First 1
+                New-TestResult ($null -ne $pol) (if($pol){"Polityka: $($pol.displayName)"}else{"Brak polityki CA dla ryzyka uzytkownika"})
+            } catch { New-TestResult $false "Blad: $_" }
+        }
+        Apply={
+            $st  = (Get-CISContext).CaState
+            $bgId= (Get-CISContext).BgId
+            $body= @{
+                displayName  = 'CAP05 - Block High Risk Users'
+                state        = $st
+                conditions   = @{
+                    users           = @{ includeUsers=@('All'); excludeUsers=@($bgId | Where-Object {$_}); excludeGroups=@() }
+                    applications    = @{ includeApplications=@('All') }
+                    userRiskLevels  = @('high')
+                }
+                grantControls = @{ operator='OR'; builtInControls=@('block') }
+            }
+            Invoke-MgGraphRequest -Method POST -Uri 'https://graph.microsoft.com/v1.0/identity/conditionalAccess/policies' -Body $body -ContentType 'application/json' | Out-Null
+            Write-CISLog "ENTRA-CA-RISK-USER: CAP05 Block High Risk Users wdrozono ($st)" OK
+        }
+    }
+
+    # ---- ENTRA: CA policy — MFA for risky sign-ins ----
+    @{
+        Id='ENTRA-CA-RISK-SIGNIN'; Service='Graph'; Area='Entra ID'; Cis='1.2.3'; Level=2
+        Name='CA: wymagaj MFA dla ryzykownych logowan Identity Protection (CIS 1.2.3)'
+        Test={
+            try {
+                $caps = (Invoke-MgGraphRequest -Method GET -Uri 'https://graph.microsoft.com/v1.0/identity/conditionalAccess/policies').value
+                $pol  = $caps | Where-Object {
+                    ($_.state -eq 'enabled' -or $_.state -eq 'enabledForReportingButNotEnforced') -and
+                    $_.conditions.signInRiskLevels -and
+                    ($_.conditions.signInRiskLevels -contains 'high' -or $_.conditions.signInRiskLevels -contains 'medium')
+                } | Select-Object -First 1
+                New-TestResult ($null -ne $pol) (if($pol){"Polityka: $($pol.displayName)"}else{"Brak polityki CA dla ryzyka logowania"})
+            } catch { New-TestResult $false "Blad: $_" }
+        }
+        Apply={
+            $st  = (Get-CISContext).CaState
+            $bgId= (Get-CISContext).BgId
+            $body= @{
+                displayName  = 'CAP06 - MFA for Risky Sign-ins'
+                state        = $st
+                conditions   = @{
+                    users             = @{ includeUsers=@('All'); excludeUsers=@($bgId | Where-Object {$_}); excludeGroups=@() }
+                    applications      = @{ includeApplications=@('All') }
+                    signInRiskLevels  = @('high','medium')
+                }
+                grantControls = @{ operator='OR'; builtInControls=@('mfa') }
+            }
+            Invoke-MgGraphRequest -Method POST -Uri 'https://graph.microsoft.com/v1.0/identity/conditionalAccess/policies' -Body $body -ContentType 'application/json' | Out-Null
+            Write-CISLog "ENTRA-CA-RISK-SIGNIN: CAP06 MFA for Risky Sign-ins wdrozono ($st)" OK
+        }
+    }
+
+    # ---- ENTRA: FIDO2 / Passkeys auth method ----
+    @{
+        Id='ENTRA-AUTHFIDO2'; Service='Graph'; Area='Entra ID'; Cis='1.x'; Level=1
+        Name='Entra: metoda uwierzytelniania FIDO2 (passkeys) wlaczona'
+        Test={
+            try {
+                $cfg = Invoke-MgGraphRequest -Method GET `
+                    -Uri 'https://graph.microsoft.com/v1.0/policies/authenticationMethodsPolicy/authenticationMethodConfigurations/FIDO2' -ErrorAction Stop
+                New-TestResult ($cfg.state -eq 'enabled') "FIDO2 state=$($cfg.state)"
+            } catch { New-TestResult $false "Blad: $_" }
+        }
+        Apply={
+            Invoke-MgGraphRequest -Method PATCH `
+                -Uri 'https://graph.microsoft.com/v1.0/policies/authenticationMethodsPolicy/authenticationMethodConfigurations/FIDO2' `
+                -Body @{ '@odata.type'='#microsoft.graph.fido2AuthenticationMethodConfiguration'; state='enabled'; isSelfServiceRegistrationAllowed=$true } `
+                -ContentType 'application/json' | Out-Null
+            Write-CISLog 'ENTRA-AUTHFIDO2: FIDO2 (passkeys) wlaczone jako metoda uwierzytelniania' OK
+        }
+    }
+
+    # ---- MDO: Phishing threshold >= 3 (Maester ORCA.101) ----
+    @{
+        Id='MDO-PHISH-THRESHOLD'; Service='EXO'; Area='Defender'; Cis='2.1.4'; Level=1
+        Name='MDO: poziom agresywnosci anty-phishing >= 3 Aggressive (ORCA 101)'
+        Test={
+            try {
+                $pol = Get-AntiPhishPolicy -IsDefault $true -ErrorAction Stop
+                $lvl = $pol.PhishThresholdLevel
+                New-TestResult ($lvl -ge 3) "PhishThresholdLevel=$lvl (zalecane >=3 Aggressive)"
+            } catch { New-TestResult $false "Blad: $_" }
+        }
+        Apply={
+            Set-AntiPhishPolicy -Identity 'Office365 AntiPhish Default' -PhishThresholdLevel 3
+            Write-CISLog 'MDO-PHISH-THRESHOLD: PhishThresholdLevel=3 (Aggressive)' OK
+        }
+    }
+
+    # ---- MDO: Honor DMARC policy in anti-phish ----
+    @{
+        Id='MDO-DMARC-POLICY'; Service='EXO'; Area='Defender'; Cis='2.1.x'; Level=1
+        Name='MDO: respektowanie DMARC p=reject w filtrze anty-phishingowym'
+        Test={
+            try {
+                $pol = Get-AntiPhishPolicy -IsDefault $true -ErrorAction Stop
+                New-TestResult ($pol.HonorDmarcPolicy -eq $true) "HonorDmarcPolicy=$($pol.HonorDmarcPolicy)"
+            } catch { New-TestResult $false "Blad: $_" }
+        }
+        Apply={
+            Set-AntiPhishPolicy -Identity 'Office365 AntiPhish Default' -HonorDmarcPolicy $true
+            Write-CISLog 'MDO-DMARC-POLICY: HonorDmarcPolicy=$true - polityka DMARC p=reject bedzie honorowana' OK
+        }
+    }
+
+    # ---- MDO: Bulk threshold BCL <= 6 (Maester ORCA) ----
+    @{
+        Id='MDO-BULK-THRESHOLD'; Service='EXO'; Area='Defender'; Cis='2.1.5'; Level=1
+        Name='MDO: prog BCL (bulk complaint level) <= 6 (ORCA)'
+        Test={
+            try {
+                $pol = Get-HostedContentFilterPolicy -Identity Default -ErrorAction Stop
+                $bcl = $pol.BulkThreshold
+                New-TestResult ($bcl -le 6) "BulkThreshold=$bcl (zalecane <=6)"
+            } catch { New-TestResult $false "Blad: $_" }
+        }
+        Apply={
+            Set-HostedContentFilterPolicy -Identity Default -BulkThreshold 6
+            Write-CISLog 'MDO-BULK-THRESHOLD: BulkThreshold=6' OK
+        }
+    }
+
+    # ---- MDO: End-user quarantine notifications ----
+    @{
+        Id='MDO-QUARANTINE-NOTIFY'; Service='EXO'; Area='Defender'; Cis='2.1.x'; Level=1
+        Name='MDO: powiadomienia kwarantanny dla uzytkownikow koncowych wlaczone'
+        Test={
+            try {
+                $pols     = Get-QuarantinePolicy -ErrorAction Stop
+                $esnCount = @($pols | Where-Object ESNEnabled -eq $true).Count
+                New-TestResult ($esnCount -gt 0) "Polityki z ESN wlaczonym: $esnCount / $($pols.Count)"
+            } catch { New-TestResult $false "Blad: $_" }
+        }
+        Apply={
+            try {
+                Set-QuarantinePolicy -Identity DefaultGlobalTag -ESNEnabled $true -EndUserQuarantinePermissionsValue 23 -ErrorAction Stop
+                Write-CISLog 'MDO-QUARANTINE-NOTIFY: ESNEnabled=$true dla DefaultGlobalTag' OK
+            } catch {
+                Write-CISLog "MDO-QUARANTINE-NOTIFY: $($_.Exception.Message) — skonfiguruj w Microsoft Defender portal > Policies > Quarantine policies." WARN
+            }
+        }
+    }
+
+    # ---- MDO: Mailbox intelligence (Maester ORCA) ----
+    @{
+        Id='MDO-MAILBOX-INTEL'; Service='EXO'; Area='Defender'; Cis='2.1.4'; Level=1
+        Name='MDO: Mailbox Intelligence i ochrona przed personifikacja wlaczone (ORCA)'
+        Test={
+            try {
+                $pol = Get-AntiPhishPolicy -IsDefault $true -ErrorAction Stop
+                $ok  = $pol.EnableMailboxIntelligence -and $pol.EnableMailboxIntelligenceProtection
+                New-TestResult $ok "MailboxIntelligence=$($pol.EnableMailboxIntelligence), IntelligenceProtection=$($pol.EnableMailboxIntelligenceProtection)"
+            } catch { New-TestResult $false "Blad: $_" }
+        }
+        Apply={
+            Set-AntiPhishPolicy -Identity 'Office365 AntiPhish Default' `
+                -EnableMailboxIntelligence $true `
+                -EnableMailboxIntelligenceProtection $true `
+                -MailboxIntelligenceProtectionAction Quarantine
+            Write-CISLog 'MDO-MAILBOX-INTEL: MailboxIntelligence+IntelligenceProtection=true, akcja=Quarantine' OK
+        }
+    }
+
+    # ---- EXO: No transport rules bypassing spam (SCL=-1) ----
+    @{
+        Id='EXO-BYPASS-RULES'; Service='EXO'; Area='Exchange'; Cis='6.x'; Level=1
+        Name='EXO: brak aktywnych regul transportu omijajacych filtrowanie spamu (SCL=-1)'
+        Test={
+            try {
+                $bypass = @(Get-TransportRule -ErrorAction Stop | Where-Object { $_.SetSCL -eq -1 -and $_.State -eq 'Enabled' })
+                New-TestResult ($bypass.Count -eq 0) ("Reguly SCL=-1: {0}" -f $(if($bypass.Count-eq 0){'brak (OK)'}else{($bypass.Name -join ', ')}))
+            } catch { New-TestResult $false "Blad: $_" }
+        }
+        Apply={ Write-CISLog 'EXO-BYPASS-RULES: Przejrzyj w EAC > Mail flow > Rules reguly z SCL=-1 i wylacz te nieuzasadnione.' WARN }
+    }
+
+    # ---- EXO: Inbound connectors require TLS ----
+    @{
+        Id='EXO-CONNECTORS-TLS'; Service='EXO'; Area='Exchange'; Cis='6.x'; Level=1
+        Name='EXO: aktywne connectory przychodzace wymagaja TLS'
+        Test={
+            try {
+                $conns = @(Get-InboundConnector -ErrorAction Stop | Where-Object Enabled -eq $true)
+                if ($conns.Count -eq 0) { return New-TestResult $true 'Brak aktywnych connectorow przychodzacych' }
+                $noTls = @($conns | Where-Object { $_.RequireTls -ne $true })
+                New-TestResult ($noTls.Count -eq 0) ("Bez TLS: {0}" -f $(if($noTls.Count-eq 0){'brak (OK)'}else{($noTls.Name-join', ')}))
+            } catch { New-TestResult $false "Blad: $_" }
+        }
+        Apply={
+            $conns = Get-InboundConnector -ErrorAction Stop | Where-Object { $_.Enabled -eq $true -and $_.RequireTls -ne $true }
+            foreach ($c in $conns) {
+                Set-InboundConnector -Identity $c.Identity -RequireTls $true -ErrorAction SilentlyContinue
+                Write-CISLog "EXO-CONNECTORS-TLS: wlaczono RequireTls dla '$($c.Name)'" OK
+            }
+            if (-not $conns) { Write-CISLog 'EXO-CONNECTORS-TLS: wszystkie connectory juz wymagaja TLS' OK }
+        }
+    }
+
+    # ---- SPO: Default sharing link type = Direct (specific people) ----
+    @{
+        Id='SPO-DEFAULT-LINK'; Service='SPO'; Area='SharePoint'; Cis='7.2.3'; Level=1
+        Name='SPO: domyslny link udostepniania = tylko konkretne osoby (Direct)'
+        Test={
+            try {
+                $spo  = Get-SPOTenant -ErrorAction Stop
+                $link = $spo.DefaultSharingLinkType
+                New-TestResult ($link -eq 'Direct' -or $link -eq 'Internal') "DefaultSharingLinkType=$link (zalecane Direct)"
+            } catch { New-TestResult $false "Blad: $_" }
+        }
+        Apply={
+            Set-SPOTenant -DefaultSharingLinkType Direct
+            Write-CISLog 'SPO-DEFAULT-LINK: DefaultSharingLinkType=Direct (tylko konkretne osoby)' OK
+        }
+    }
+
+    # ---- SPO: Default link permission = View ----
+    @{
+        Id='SPO-LINK-PERMISSION'; Service='SPO'; Area='SharePoint'; Cis='7.2.4'; Level=1
+        Name='SPO: domyslne uprawnienie linku = tylko podglad (View)'
+        Test={
+            try {
+                $spo  = Get-SPOTenant -ErrorAction Stop
+                $perm = $spo.DefaultLinkPermission
+                New-TestResult ($perm -eq 'View') "DefaultLinkPermission=$perm (zalecane View)"
+            } catch { New-TestResult $false "Blad: $_" }
+        }
+        Apply={
+            Set-SPOTenant -DefaultLinkPermission View
+            Write-CISLog 'SPO-LINK-PERMISSION: DefaultLinkPermission=View' OK
+        }
+    }
+
+    # ---- Teams: Lobby bypass — EveryoneInCompanyExcludingGuests ----
+    @{
+        Id='TEAMS-LOBBY'; Service='Teams'; Area='Teams'; Cis='8.1.1'; Level=1
+        Name='Teams: lobby omijaja tylko uzytkownicy organizacji (bez gosci)'
+        Test={
+            try {
+                $pol    = Get-CsTeamsMeetingPolicy -Identity Global -ErrorAction Stop
+                $bypass = $pol.AutoAdmittedUsers
+                New-TestResult ($bypass -eq 'EveryoneInCompanyExcludingGuests' -or $bypass -eq 'OrganizerOnly') "AutoAdmittedUsers=$bypass"
+            } catch { New-TestResult $false "Blad: $_" }
+        }
+        Apply={
+            Set-CsTeamsMeetingPolicy -Identity Global -AutoAdmittedUsers 'EveryoneInCompanyExcludingGuests'
+            Write-CISLog 'TEAMS-LOBBY: AutoAdmittedUsers=EveryoneInCompanyExcludingGuests' OK
+        }
+    }
+
+    # ---- Teams: PSTN callers must go through lobby ----
+    @{
+        Id='TEAMS-PSTN-LOBBY'; Service='Teams'; Area='Teams'; Cis='8.1.2'; Level=1
+        Name='Teams: dzwoniacy przez PSTN nie omijaja lobby'
+        Test={
+            try {
+                $pol    = Get-CsTeamsMeetingPolicy -Identity Global -ErrorAction Stop
+                $bypass = $pol.AllowPSTNUsersToBypassLobby
+                New-TestResult ($bypass -eq $false) "AllowPSTNUsersToBypassLobby=$bypass (zalecane False)"
+            } catch { New-TestResult $false "Blad: $_" }
+        }
+        Apply={
+            Set-CsTeamsMeetingPolicy -Identity Global -AllowPSTNUsersToBypassLobby $false
+            Write-CISLog 'TEAMS-PSTN-LOBBY: AllowPSTNUsersToBypassLobby=$false' OK
+        }
     }
 )
     return $ControlRegistry
