@@ -927,7 +927,7 @@ $ControlRegistry = @(
         Name='Ogranicz dostęp do portalu Entra tylko do administratorów'
         Test={
             try {
-                $tmplId = ((Invoke-MgGraphRequest -Method GET -Uri 'https://graph.microsoft.com/v1.0/directorySettingTemplates').value |
+                $tmplId = ((Invoke-MgGraphRequest -Method GET -Uri 'https://graph.microsoft.com/beta/directorySettingTemplates').value |
                     Where-Object displayName -eq 'Authorization Policy' | Select-Object -First 1).id
                 if (-not $tmplId) { return New-TestResult $false 'Brak szablonu Authorization Policy' }
                 $setting = (Invoke-MgGraphRequest -Method GET -Uri 'https://graph.microsoft.com/v1.0/directorySettings').value |
@@ -938,7 +938,7 @@ $ControlRegistry = @(
             } catch { New-TestResult $false "Blad odczytu: $_" }
         }
         Apply={
-            $templates = (Invoke-MgGraphRequest -Method GET -Uri 'https://graph.microsoft.com/v1.0/directorySettingTemplates').value
+            $templates = (Invoke-MgGraphRequest -Method GET -Uri 'https://graph.microsoft.com/beta/directorySettingTemplates').value
             $tmpl = $templates | Where-Object displayName -eq 'Authorization Policy' | Select-Object -First 1
             if (-not $tmpl) { throw 'Brak szablonu Authorization Policy w directorySettingTemplates' }
             $settings = (Invoke-MgGraphRequest -Method GET -Uri 'https://graph.microsoft.com/v1.0/directorySettings').value
@@ -962,7 +962,7 @@ $ControlRegistry = @(
         Name='Zablokuj tworzenie grup Microsoft 365 przez zwykłych użytkowników'
         Test={
             try {
-                $tmpl = (Invoke-MgGraphRequest -Method GET -Uri 'https://graph.microsoft.com/v1.0/directorySettingTemplates').value |
+                $tmpl = (Invoke-MgGraphRequest -Method GET -Uri 'https://graph.microsoft.com/beta/directorySettingTemplates').value |
                     Where-Object displayName -eq 'Group.Unified' | Select-Object -First 1
                 if (-not $tmpl) { return New-TestResult $false 'Brak szablonu Group.Unified' }
                 $setting = (Invoke-MgGraphRequest -Method GET -Uri 'https://graph.microsoft.com/v1.0/directorySettings').value |
@@ -973,7 +973,7 @@ $ControlRegistry = @(
             } catch { New-TestResult $false "Blad odczytu: $_" }
         }
         Apply={
-            $templates = (Invoke-MgGraphRequest -Method GET -Uri 'https://graph.microsoft.com/v1.0/directorySettingTemplates').value
+            $templates = (Invoke-MgGraphRequest -Method GET -Uri 'https://graph.microsoft.com/beta/directorySettingTemplates').value
             $tmpl = $templates | Where-Object displayName -eq 'Group.Unified' | Select-Object -First 1
             if (-not $tmpl) { throw 'Brak szablonu Group.Unified' }
             $settings = (Invoke-MgGraphRequest -Method GET -Uri 'https://graph.microsoft.com/v1.0/directorySettings').value
@@ -1742,7 +1742,7 @@ $ControlRegistry = @(
                     ($_.state -eq 'enabled' -or $_.state -eq 'enabledForReportingButNotEnforced') -and
                     ($_.conditions.userRiskLevels -contains 'high')
                 } | Select-Object -First 1
-                New-TestResult ($null -ne $pol) (if($pol){"Polityka: $($pol.displayName)"}else{"Brak polityki CA dla ryzyka uzytkownika"})
+                New-TestResult ($null -ne $pol) $(if($pol){"Polityka: $($pol.displayName)"}else{"Brak polityki CA dla ryzyka uzytkownika"})
             } catch { New-TestResult $false "Blad: $_" }
         }
         Apply={
@@ -1775,7 +1775,7 @@ $ControlRegistry = @(
                     $_.conditions.signInRiskLevels -and
                     ($_.conditions.signInRiskLevels -contains 'high' -or $_.conditions.signInRiskLevels -contains 'medium')
                 } | Select-Object -First 1
-                New-TestResult ($null -ne $pol) (if($pol){"Polityka: $($pol.displayName)"}else{"Brak polityki CA dla ryzyka logowania"})
+                New-TestResult ($null -ne $pol) $(if($pol){"Polityka: $($pol.displayName)"}else{"Brak polityki CA dla ryzyka logowania"})
             } catch { New-TestResult $false "Blad: $_" }
         }
         Apply={
@@ -2033,21 +2033,21 @@ $ControlRegistry = @(
         Name='Entra ID: Smart Lockout — prog blokady ≤10, czas trwania ≥60s'
         Test={
             try {
-                $resp = Invoke-MgGraphRequest -Method GET -Uri 'https://graph.microsoft.com/v1.0/settings' -ErrorAction Stop
-                $pwd  = $resp.value | Where-Object { $_.displayName -eq 'Password Rule Settings' }
-                if (-not $pwd) {
+                $resp       = Invoke-MgGraphRequest -Method GET -Uri 'https://graph.microsoft.com/beta/settings' -ErrorAction Stop
+                $pwdSetting = $resp.value | Where-Object { $_.displayName -eq 'Password Rule Settings' }
+                if (-not $pwdSetting) {
                     return New-TestResult $true 'Uzywa domyslnych wartosci MS (threshold=10, duration=60s) — zgodne'
                 }
-                $thresh = [int](($pwd.values | Where-Object name -eq 'LockoutThreshold').value)
-                $dur    = [int](($pwd.values | Where-Object name -eq 'LockoutDurationInSeconds').value)
+                $thresh = [int](($pwdSetting.values | Where-Object name -eq 'LockoutThreshold').value)
+                $dur    = [int](($pwdSetting.values | Where-Object name -eq 'LockoutDurationInSeconds').value)
                 New-TestResult ($thresh -le 10 -and $dur -ge 60) "LockoutThreshold=$thresh (max 10), LockoutDurationInSeconds=$dur (min 60s)"
             } catch { New-TestResult $false "Blad: $_" }
         }
         Apply={
             try {
-                $resp   = Invoke-MgGraphRequest -Method GET -Uri 'https://graph.microsoft.com/v1.0/settings' -ErrorAction Stop
-                $pwd    = $resp.value | Where-Object { $_.displayName -eq 'Password Rule Settings' }
-                $vals   = @(
+                $resp       = Invoke-MgGraphRequest -Method GET -Uri 'https://graph.microsoft.com/beta/settings' -ErrorAction Stop
+                $pwdSetting = $resp.value | Where-Object { $_.displayName -eq 'Password Rule Settings' }
+                $vals = @(
                     @{ name='LockoutThreshold';         value='10' }
                     @{ name='LockoutDurationInSeconds'; value='60' }
                     @{ name='BannedPasswordCheckOnPremisesMode'; value='Audit' }
@@ -2055,18 +2055,18 @@ $ControlRegistry = @(
                     @{ name='EnableBannedPasswordCheck'; value='True' }
                     @{ name='LockoutObservationWindow'; value='60' }
                 )
-                if ($pwd) {
+                if ($pwdSetting) {
                     foreach ($v in $vals) {
-                        $existing = $pwd.values | Where-Object name -eq $v.name
+                        $existing = $pwdSetting.values | Where-Object name -eq $v.name
                         if ($existing) { $existing.value = $v.value }
                     }
-                    Invoke-MgGraphRequest -Method PATCH -Uri "https://graph.microsoft.com/v1.0/settings/$($pwd.id)" `
-                        -Body @{ values = $pwd.values } -ContentType 'application/json' | Out-Null
+                    Invoke-MgGraphRequest -Method PATCH -Uri "https://graph.microsoft.com/beta/settings/$($pwdSetting.id)" `
+                        -Body @{ values = $pwdSetting.values } -ContentType 'application/json' | Out-Null
                 } else {
-                    $templateId = (Invoke-MgGraphRequest -Method GET -Uri 'https://graph.microsoft.com/v1.0/directorySettingTemplates' -ErrorAction Stop).value |
+                    $templateId = (Invoke-MgGraphRequest -Method GET -Uri 'https://graph.microsoft.com/beta/directorySettingTemplates' -ErrorAction Stop).value |
                         Where-Object displayName -eq 'Password Rule Settings' | Select-Object -First 1 -ExpandProperty id
                     if ($templateId) {
-                        Invoke-MgGraphRequest -Method POST -Uri 'https://graph.microsoft.com/v1.0/settings' `
+                        Invoke-MgGraphRequest -Method POST -Uri 'https://graph.microsoft.com/beta/settings' `
                             -Body @{ templateId=$templateId; values=$vals } -ContentType 'application/json' | Out-Null
                     }
                 }
