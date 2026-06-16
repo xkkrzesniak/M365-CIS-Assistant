@@ -930,7 +930,7 @@ $ControlRegistry = @(
                 $tmplId = ((Invoke-MgGraphRequest -Method GET -Uri 'https://graph.microsoft.com/beta/directorySettingTemplates').value |
                     Where-Object displayName -eq 'Authorization Policy' | Select-Object -First 1).id
                 if (-not $tmplId) { return New-TestResult $false 'Brak szablonu Authorization Policy' }
-                $setting = (Invoke-MgGraphRequest -Method GET -Uri 'https://graph.microsoft.com/v1.0/directorySettings').value |
+                $setting = (Invoke-MgGraphRequest -Method GET -Uri 'https://graph.microsoft.com/beta/settings').value |
                     Where-Object templateId -eq $tmplId | Select-Object -First 1
                 if (-not $setting) { return New-TestResult $false 'Brak ustawienia (domyslnie: dostep dla wszystkich)' }
                 $val = ($setting.values | Where-Object name -eq 'EnableAdminPanelRestriction').value
@@ -941,17 +941,17 @@ $ControlRegistry = @(
             $templates = (Invoke-MgGraphRequest -Method GET -Uri 'https://graph.microsoft.com/beta/directorySettingTemplates').value
             $tmpl = $templates | Where-Object displayName -eq 'Authorization Policy' | Select-Object -First 1
             if (-not $tmpl) { throw 'Brak szablonu Authorization Policy w directorySettingTemplates' }
-            $settings = (Invoke-MgGraphRequest -Method GET -Uri 'https://graph.microsoft.com/v1.0/directorySettings').value
+            $settings = (Invoke-MgGraphRequest -Method GET -Uri 'https://graph.microsoft.com/beta/settings').value
             $setting = $settings | Where-Object templateId -eq $tmpl.id | Select-Object -First 1
             $newVals = @(@{ name='EnableAdminPanelRestriction'; value='true' })
             if ($setting) {
-                Invoke-MgGraphRequest -Method PATCH -Uri "https://graph.microsoft.com/v1.0/directorySettings/$($setting.id)" `
+                Invoke-MgGraphRequest -Method PATCH -Uri "https://graph.microsoft.com/beta/settings/$($setting.id)" `
                     -Body @{ values = $newVals } -ContentType 'application/json' | Out-Null
             } else {
                 $allVals = $tmpl.values | ForEach-Object {
                     @{ name=$_.name; value=if($_.name -eq 'EnableAdminPanelRestriction'){'true'}else{$_.defaultValue} }
                 }
-                Invoke-MgGraphRequest -Method POST -Uri 'https://graph.microsoft.com/v1.0/directorySettings' `
+                Invoke-MgGraphRequest -Method POST -Uri 'https://graph.microsoft.com/beta/settings' `
                     -Body @{ templateId=$tmpl.id; values=$allVals } -ContentType 'application/json' | Out-Null
             }
         }
@@ -965,7 +965,7 @@ $ControlRegistry = @(
                 $tmpl = (Invoke-MgGraphRequest -Method GET -Uri 'https://graph.microsoft.com/beta/directorySettingTemplates').value |
                     Where-Object displayName -eq 'Group.Unified' | Select-Object -First 1
                 if (-not $tmpl) { return New-TestResult $false 'Brak szablonu Group.Unified' }
-                $setting = (Invoke-MgGraphRequest -Method GET -Uri 'https://graph.microsoft.com/v1.0/directorySettings').value |
+                $setting = (Invoke-MgGraphRequest -Method GET -Uri 'https://graph.microsoft.com/beta/settings').value |
                     Where-Object templateId -eq $tmpl.id | Select-Object -First 1
                 if (-not $setting) { return New-TestResult $false 'Brak ustawienia - domyslnie tworzenie wlaczone dla wszystkich' }
                 $val = ($setting.values | Where-Object name -eq 'EnableGroupCreation').value
@@ -976,19 +976,19 @@ $ControlRegistry = @(
             $templates = (Invoke-MgGraphRequest -Method GET -Uri 'https://graph.microsoft.com/beta/directorySettingTemplates').value
             $tmpl = $templates | Where-Object displayName -eq 'Group.Unified' | Select-Object -First 1
             if (-not $tmpl) { throw 'Brak szablonu Group.Unified' }
-            $settings = (Invoke-MgGraphRequest -Method GET -Uri 'https://graph.microsoft.com/v1.0/directorySettings').value
+            $settings = (Invoke-MgGraphRequest -Method GET -Uri 'https://graph.microsoft.com/beta/settings').value
             $setting = $settings | Where-Object templateId -eq $tmpl.id | Select-Object -First 1
             if ($setting) {
                 $newVals = $setting.values | ForEach-Object {
                     @{ name=$_.name; value=if($_.name -eq 'EnableGroupCreation'){'false'}else{$_.value} }
                 }
-                Invoke-MgGraphRequest -Method PATCH -Uri "https://graph.microsoft.com/v1.0/directorySettings/$($setting.id)" `
+                Invoke-MgGraphRequest -Method PATCH -Uri "https://graph.microsoft.com/beta/settings/$($setting.id)" `
                     -Body @{ values=$newVals } -ContentType 'application/json' | Out-Null
             } else {
                 $allVals = $tmpl.values | ForEach-Object {
                     @{ name=$_.name; value=if($_.name -eq 'EnableGroupCreation'){'false'}else{$_.defaultValue} }
                 }
-                Invoke-MgGraphRequest -Method POST -Uri 'https://graph.microsoft.com/v1.0/directorySettings' `
+                Invoke-MgGraphRequest -Method POST -Uri 'https://graph.microsoft.com/beta/settings' `
                     -Body @{ templateId=$tmpl.id; values=$allVals } -ContentType 'application/json' | Out-Null
             }
         }

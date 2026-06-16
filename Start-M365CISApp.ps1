@@ -537,13 +537,43 @@ function Start-CISScan {
         return
     }
 
-    $script:_ScanIdx     = 0
-    $script:_ScanResults = [System.Collections.Generic.List[object]]::new()
+    $script:_ScanIdx           = 0
+    $script:_ScanResults       = [System.Collections.Generic.List[object]]::new()
+    $script:_ScanPendingHandle = $null
+    $script:_ScanPendingPs     = $null
+    $script:_ScanPendingCtrl   = $null
 
     if ($script:_ScanTimer) { try { $script:_ScanTimer.Stop() } catch {} }
     $script:_ScanTimer          = [System.Windows.Threading.DispatcherTimer]::new()
     $script:_ScanTimer.Interval = [TimeSpan]::FromMilliseconds(20)
     $script:_ScanTimer.Add_Tick({
+
+        # --- Krok 1: zbierz wynik oczekujacego async testu (EXO/Purview) ---
+        if ($null -ne $script:_ScanPendingHandle) {
+            if (-not $script:_ScanPendingHandle.IsCompleted) { return }
+            $c = $script:_ScanPendingCtrl
+            $status = 'Unknown'; $current = '-'
+            try {
+                $r = $script:_ScanPendingPs.EndInvoke($script:_ScanPendingHandle) |
+                        Where-Object { $_ -is [System.Management.Automation.PSObject] -and $_.PSObject.Properties['Compliant'] } |
+                        Select-Object -Last 1
+                if ($r) { $status = if ($r.Compliant) { 'Zgodne' } else { 'NIEZGODNE' }; $current = $r.Current }
+                else     { $status = 'Blad'; $current = 'Brak wyniku' }
+            } catch { $status = 'Blad'; $current = $_.Exception.Message }
+            try { $script:_ScanPendingPs.Dispose() } catch {}
+            $script:_ScanPendingHandle = $null; $script:_ScanPendingPs = $null; $script:_ScanPendingCtrl = $null
+            $row = [pscustomobject]@{
+                Selected = ($status -eq 'NIEZGODNE'); Id = $c.Id; Obszar = $c.Area; Kontrolka = $c.Name
+                Status = $status; Poziom = ("L{0}" -f $c.Level); Level = $c.Level; CIS = $c.Cis; Aktualnie = $current
+            }
+            $script:_ScanResults.Add($row); $script:AllRows.Add($row)
+            if (Test-RowVisible $row) { $script:View.Add($row) }
+            Write-CISLog ("{0,-12} L{1} {2}" -f $status,$c.Level,$c.Name) $(if($status-eq'Zgodne'){'OK'}elseif($status-eq'NIEZGODNE'){'WARN'}else{'ERROR'})
+            $script:_ScanIdx++
+            return
+        }
+
+        # --- Krok 2: sprawdz czy skan sie zakonczyl ---
         $i = $script:_ScanIdx
         if ($i -ge $script:_ScanTotal) {
             $script:_ScanTimer.Stop()
@@ -564,7 +594,29 @@ function Start-CISScan {
             Set-Status ("{0}Zgodnosc CIS: {1}% ({2}/{3} OK) | Niezgodne: {4}" -f $pfx,$pct,$ok,$script:_ScanTotal,$nok)
             return
         }
+
+        # --- Krok 3: uruchom test dla nastepnej kontrolki ---
         $c = $script:_ScanRegistry[$i]
+        $ctrl.prgScan.Value = [int](($i + 1) / $script:_ScanTotal * 100)
+        Set-Status ("[{0}/{1}] {2}" -f ($i + 1), $script:_ScanTotal, $c.Name)
+
+        $svcRS = $script:SvcRunspace
+        $needsSvc = ($c.Service -in @('EXO','Purview')) -and $null -ne $svcRS -and
+                    $svcRS.RunspaceStateInfo.State -eq 'Opened'
+
+        if ($needsSvc) {
+            # Async w SvcRunspace — nie blokuje UI, nie zamraza
+            $testPs = [powershell]::Create()
+            $testPs.Runspace = $svcRS
+            [void]$testPs.AddScript($c.Test)
+            $script:_ScanPendingHandle = $testPs.BeginInvoke()
+            $script:_ScanPendingPs     = $testPs
+            $script:_ScanPendingCtrl   = $c
+            # _ScanIdx nie rosnie tutaj — rosnie po zebraniu wyniku
+            return
+        }
+
+        # Sync w glownym runspace (Graph, SPO, Teams, Intune, itp.)
         $status = 'Unknown'; $current = '-'
         try {
             $r       = & $c.Test
@@ -575,12 +627,9 @@ function Start-CISScan {
             Selected = ($status -eq 'NIEZGODNE'); Id = $c.Id; Obszar = $c.Area; Kontrolka = $c.Name
             Status = $status; Poziom = ("L{0}" -f $c.Level); Level = $c.Level; CIS = $c.Cis; Aktualnie = $current
         }
-        $script:_ScanResults.Add($row)
-        $script:AllRows.Add($row)
+        $script:_ScanResults.Add($row); $script:AllRows.Add($row)
         if (Test-RowVisible $row) { $script:View.Add($row) }
-        $ctrl.prgScan.Value = [int](($i + 1) / $script:_ScanTotal * 100)
-        Set-Status ("[{0}/{1}] {2}" -f ($i + 1), $script:_ScanTotal, $c.Name)
-        Write-CISLog ("{0,-12} L{1} {2}" -f $status, $c.Level, $c.Name) $(if ($status -eq 'Zgodne') { 'OK' } elseif ($status -eq 'NIEZGODNE') { 'WARN' } else { 'ERROR' })
+        Write-CISLog ("{0,-12} L{1} {2}" -f $status,$c.Level,$c.Name) $(if($status-eq'Zgodne'){'OK'}elseif($status-eq'NIEZGODNE'){'WARN'}else{'ERROR'})
         $script:_ScanIdx++
     })
     $script:_ScanTimer.Start()
@@ -664,15 +713,15 @@ $ctrl.btnConnect.Add_Click({
     $connTimer.Start()
     [System.Windows.Threading.Dispatcher]::PushFrame($connFrame)
 
-    # Importuj EXO modul w glownym runspace PRZED zamknieciem bg runspace.
-    # Gdy bg runspace sie zamknie i modul zostanie z niego usuniety, OnRemove nie
-    # wyczysci statycznego tokenu EXO poniewaz modul wciaz jest zaladowany tutaj.
-    if ($connSync.Ctx -and $connSync.Ctx.Connected.EXO) {
-        try { Import-Module ExchangeOnlineManagement -Force -ErrorAction SilentlyContinue } catch {}
-    }
-
     try { $ps.EndInvoke($handle) } catch {}
-    $ps.Dispose(); $rs.Close()
+    $ps.Dispose()
+    # NIE zamykamy $rs — staje sie SvcRunspace dla EXO/Purview skanow i wdrozen.
+    # EXO cmdlety (Get-AntiPhishPolicy itp.) sa dynamicznie importowane do runspace
+    # przez Connect-ExchangeOnline i nie moga byc przeniesione do innego runspace.
+    if ($script:SvcRunspace -and $script:SvcRunspace -ne $rs) {
+        try { $script:SvcRunspace.Close() } catch {}
+    }
+    $script:SvcRunspace = $rs
 
     $win.Cursor = 'Arrow'
     $ctrl.btnConnect.IsEnabled = $true
@@ -1070,13 +1119,44 @@ $ctrl.btnApply.Add_Click({
     $reg = Get-CISControlRegistry
     $script:_ApplyList    = @($ids | ForEach-Object { $id=$_; $reg | Where-Object Id -eq $id })
     $script:_ApplyTotal   = $script:_ApplyList.Count
-    $script:_ApplyIdx     = 0
-    $script:_ApplyResults = [System.Collections.Generic.List[object]]::new()
+    $script:_ApplyIdx           = 0
+    $script:_ApplyResults       = [System.Collections.Generic.List[object]]::new()
+    $script:_ApplyPendingHandle = $null
+    $script:_ApplyPendingPs     = $null
+    $script:_ApplyPendingCtrl   = $null
+
+    # Zsynchronizuj kontekst (BgId, CaState) do SvcRunspace przed wdrozeniem
+    if ($script:SvcRunspace -and $script:SvcRunspace.RunspaceStateInfo.State -eq 'Opened') {
+        $ctxToSync = Get-CISContext
+        $syncPs = [powershell]::Create(); $syncPs.Runspace = $script:SvcRunspace
+        [void]$syncPs.AddScript('param($c) Set-CISContext -Ctx $c').AddArgument($ctxToSync)
+        try { [void]$syncPs.Invoke() } catch {}
+        $syncPs.Dispose()
+    }
 
     if ($script:_ApplyTimer) { try { $script:_ApplyTimer.Stop() } catch {} }
     $script:_ApplyTimer = [System.Windows.Threading.DispatcherTimer]::new()
     $script:_ApplyTimer.Interval = [TimeSpan]::FromMilliseconds(20)
     $script:_ApplyTimer.Add_Tick({
+
+        # --- Zbierz wynik oczekujacego async Apply (EXO/Purview) ---
+        if ($null -ne $script:_ApplyPendingHandle) {
+            if (-not $script:_ApplyPendingHandle.IsCompleted) { return }
+            $c = $script:_ApplyPendingCtrl
+            try {
+                $script:_ApplyPendingPs.EndInvoke($script:_ApplyPendingHandle) | Out-Null
+                Write-CISLog ("WDROZONO: {0}" -f $c.Name) OK
+                $script:_ApplyResults.Add([pscustomobject]@{ Id=$c.Id; Name=$c.Name; Status='APPLIED'; Detail='' })
+            } catch {
+                Write-CISLog ("BLAD [{0}]: {1}" -f $c.Id,$_.Exception.Message) ERROR
+                $script:_ApplyResults.Add([pscustomobject]@{ Id=$c.Id; Name=$c.Name; Status='ERROR'; Detail=$_.Exception.Message })
+            }
+            try { $script:_ApplyPendingPs.Dispose() } catch {}
+            $script:_ApplyPendingHandle = $null; $script:_ApplyPendingPs = $null; $script:_ApplyPendingCtrl = $null
+            $script:_ApplyIdx++
+            return
+        }
+
         $i = $script:_ApplyIdx
         if ($i -ge $script:_ApplyTotal) {
             $script:_ApplyTimer.Stop()
@@ -1096,21 +1176,37 @@ $ctrl.btnApply.Add_Click({
             return
         }
         $c = $script:_ApplyList[$i]
+        $ctrl.prgScan.Value = [int](($i+1)/$script:_ApplyTotal*100)
+        Set-Status ("{0}: [{1}/{2}] {3}" -f $script:_ApplyMode,($i+1),$script:_ApplyTotal,$c.Name)
+
         if ($script:_ApplyWhatIf) {
             Write-CISLog ("WHATIF: {0}" -f $c.Name) SKIP
             $script:_ApplyResults.Add([pscustomobject]@{ Id=$c.Id; Name=$c.Name; Status='WHATIF'; Detail='' })
-        } else {
-            try {
-                & $c.Apply
-                Write-CISLog ("WDROZONO: {0}" -f $c.Name) OK
-                $script:_ApplyResults.Add([pscustomobject]@{ Id=$c.Id; Name=$c.Name; Status='APPLIED'; Detail='' })
-            } catch {
-                Write-CISLog ("BLAD [{0}]: {1}" -f $c.Id,$_.Exception.Message) ERROR
-                $script:_ApplyResults.Add([pscustomobject]@{ Id=$c.Id; Name=$c.Name; Status='ERROR'; Detail=$_.Exception.Message })
-            }
+            $script:_ApplyIdx++
+            return
         }
-        $ctrl.prgScan.Value = [int](($i+1)/$script:_ApplyTotal*100)
-        Set-Status ("{0}: [{1}/{2}] {3}" -f $script:_ApplyMode,($i+1),$script:_ApplyTotal,$c.Name)
+
+        $svcRS = $script:SvcRunspace
+        $needsSvc = ($c.Service -in @('EXO','Purview')) -and $null -ne $svcRS -and
+                    $svcRS.RunspaceStateInfo.State -eq 'Opened'
+
+        if ($needsSvc) {
+            $applyPs = [powershell]::Create(); $applyPs.Runspace = $svcRS
+            [void]$applyPs.AddScript($c.Apply)
+            $script:_ApplyPendingHandle = $applyPs.BeginInvoke()
+            $script:_ApplyPendingPs     = $applyPs
+            $script:_ApplyPendingCtrl   = $c
+            return
+        }
+
+        try {
+            & $c.Apply
+            Write-CISLog ("WDROZONO: {0}" -f $c.Name) OK
+            $script:_ApplyResults.Add([pscustomobject]@{ Id=$c.Id; Name=$c.Name; Status='APPLIED'; Detail='' })
+        } catch {
+            Write-CISLog ("BLAD [{0}]: {1}" -f $c.Id,$_.Exception.Message) ERROR
+            $script:_ApplyResults.Add([pscustomobject]@{ Id=$c.Id; Name=$c.Name; Status='ERROR'; Detail=$_.Exception.Message })
+        }
         $script:_ApplyIdx++
     })
     $script:_ApplyTimer.Start()
