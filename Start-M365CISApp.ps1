@@ -518,33 +518,116 @@ function Load-ProfileList {
 
 # --- Akcje ---
 $ctrl.btnConnect.Add_Click({
-    try {
-        $win.Cursor='Wait'; Set-Status 'Laczenie...'
-        $state = Get-Combo $ctrl.cmbCaState
-        Connect-CISServices -SkipEntra:$ctrl.chkSkipEntra.IsChecked -SkipExchange:$ctrl.chkSkipExo.IsChecked `
-            -SkipSharePoint:$ctrl.chkSkipSpo.IsChecked -SkipTeams:$ctrl.chkSkipTeams.IsChecked `
-            -SkipIntune:$ctrl.chkSkipIntune.IsChecked -SkipPurview:$ctrl.chkSkipPurview.IsChecked `
-            -SkipPowerPlatform:$ctrl.chkSkipPP.IsChecked `
-            -ConditionalAccessState $state | Out-Null
-        $c = Get-CISContext
-        $ctrl.lblTenant.Text = "   Tenant: " + $(if($c.TenantInitialDomain){$c.TenantInitialDomain}else{'(nieznany)'})
-        # Wymuszony break-glass
-        if ($c.Connected.Graph) {
-            Set-Status 'Wybierz konto break-glass...'
-            $pick = Show-BGADialog
-            if ($pick) {
-                $script:BgUser = $pick
-                Set-CISBreakGlass -User $script:BgUser | Out-Null
-                $ctrl.lblBg.Text = "   Break-glass: " + $script:BgUser.UserPrincipalName
-            } else {
-                [System.Windows.MessageBox]::Show('Nie wybrano konta break-glass. Polityki CA beda zablokowane do czasu wyboru.','Uwaga','OK','Warning') | Out-Null
-            }
+    # Odczytaj wartości GUI na wątku UI zanim uruchomimy background runspace
+    $caState     = Get-Combo $ctrl.cmbCaState
+    $skipEntra   = [bool]$ctrl.chkSkipEntra.IsChecked
+    $skipExo     = [bool]$ctrl.chkSkipExo.IsChecked
+    $skipSpo     = [bool]$ctrl.chkSkipSpo.IsChecked
+    $skipTeams   = [bool]$ctrl.chkSkipTeams.IsChecked
+    $skipIntune  = [bool]$ctrl.chkSkipIntune.IsChecked
+    $skipPurview = [bool]$ctrl.chkSkipPurview.IsChecked
+    $skipPP      = [bool]$ctrl.chkSkipPP.IsChecked
+
+    $ctrl.btnConnect.IsEnabled = $false
+    $win.Cursor = 'Wait'
+    Set-Status 'Łączenie w tle — okno pozostaje aktywne...'
+
+    # Hashtable synchronizowana między wątkami — wynik z runspace
+    $connSync = [hashtable]::Synchronized(@{ Done=$false; Error=$null; Ctx=$null })
+    $_win     = $win
+    $_appRoot = $script:AppRoot
+    $_modPath = $env:PSModulePath
+
+    $rs = [runspacefactory]::CreateRunspace()
+    $rs.Open()
+    $rs.SessionStateProxy.SetVariable('connSync',    $connSync)
+    $rs.SessionStateProxy.SetVariable('_win',        $_win)
+    $rs.SessionStateProxy.SetVariable('_appRoot',    $_appRoot)
+    $rs.SessionStateProxy.SetVariable('_modPath',    $_modPath)
+    $rs.SessionStateProxy.SetVariable('caState',     $caState)
+    $rs.SessionStateProxy.SetVariable('skipEntra',   $skipEntra)
+    $rs.SessionStateProxy.SetVariable('skipExo',     $skipExo)
+    $rs.SessionStateProxy.SetVariable('skipSpo',     $skipSpo)
+    $rs.SessionStateProxy.SetVariable('skipTeams',   $skipTeams)
+    $rs.SessionStateProxy.SetVariable('skipIntune',  $skipIntune)
+    $rs.SessionStateProxy.SetVariable('skipPurview', $skipPurview)
+    $rs.SessionStateProxy.SetVariable('skipPP',      $skipPP)
+
+    $ps = [powershell]::Create()
+    $ps.Runspace = $rs
+    [void]$ps.AddScript({
+        $env:PSModulePath = $_modPath
+        Import-Module (Join-Path $_appRoot 'M365CISCore.psm1') -Force -ErrorAction Stop
+
+        # Logi przekazywane do okna GUI przez Dispatcher (bezpieczne z każdego wątku)
+        Set-CISLogCallback {
+            param($Message, $Level)
+            $line = "[{0}] [{1}] {2}`r`n" -f (Get-Date -Format 'HH:mm:ss'), $Level, $Message
+            $_win.Dispatcher.Invoke([action]{
+                $log = $_win.FindName('txtLog')
+                if ($log) { $log.AppendText($line); $log.ScrollToEnd() }
+            })
         }
-        Set-Status 'Polaczono. Mozesz skanowac.'
-    } catch {
-        [System.Windows.MessageBox]::Show($_.Exception.Message,'Blad polaczenia','OK','Error') | Out-Null
-        Set-Status 'Blad polaczenia.'
-    } finally { $win.Cursor='Arrow' }
+
+        try {
+            Connect-CISServices `
+                -SkipEntra:([bool]$skipEntra)     -SkipExchange:([bool]$skipExo) `
+                -SkipSharePoint:([bool]$skipSpo)   -SkipTeams:([bool]$skipTeams) `
+                -SkipIntune:([bool]$skipIntune)    -SkipPurview:([bool]$skipPurview) `
+                -SkipPowerPlatform:([bool]$skipPP) -ConditionalAccessState $caState
+            $connSync.Ctx = Get-CISContext
+        } catch {
+            $connSync.Error = $_.Exception.Message
+        } finally {
+            $connSync.Done = $true
+        }
+    })
+    $handle = $ps.BeginInvoke()
+
+    # Czekaj bez blokowania UI — DispatcherFrame pompuje zdarzenia WPF podczas oczekiwania
+    $connFrame = [System.Windows.Threading.DispatcherFrame]::new()
+    $connTimer = [System.Windows.Threading.DispatcherTimer]::new()
+    $connTimer.Interval = [TimeSpan]::FromMilliseconds(300)
+    $connTimer.Add_Tick({
+        if ($connSync.Done) { $connTimer.Stop(); $connFrame.Continue = $false }
+    }.GetNewClosure())
+    $connTimer.Start()
+    [System.Windows.Threading.Dispatcher]::PushFrame($connFrame)
+
+    try { $ps.EndInvoke($handle) } catch {}
+    $ps.Dispose(); $rs.Close()
+
+    $win.Cursor = 'Arrow'
+    $ctrl.btnConnect.IsEnabled = $true
+
+    if ($connSync.Error) {
+        [System.Windows.MessageBox]::Show($connSync.Error, 'Błąd połączenia', 'OK', 'Error') | Out-Null
+        Set-Status 'Błąd połączenia.'
+        return
+    }
+
+    # Zsynchronizuj kontekst CIS do głównego runspace (Microsoft.Graph / EXO v3 używają
+    # statycznych obiektów .NET współdzielonych między runspace'ami, więc cmdlety działają)
+    if ($connSync.Ctx) {
+        Set-CISContext -Ctx $connSync.Ctx
+        $c = $connSync.Ctx
+        $ctrl.lblTenant.Text = "   Tenant: " + $(if($c.TenantInitialDomain){$c.TenantInitialDomain}else{'(nieznany)'})
+    }
+
+    # Break-glass dialog musi działać na wątku UI
+    $c = Get-CISContext
+    if ($c.Connected.Graph) {
+        Set-Status 'Wybierz konto break-glass...'
+        $pick = Show-BGADialog
+        if ($pick) {
+            $script:BgUser = $pick
+            Set-CISBreakGlass -User $script:BgUser | Out-Null
+            $ctrl.lblBg.Text = "   Break-glass: " + $script:BgUser.UserPrincipalName
+        } else {
+            [System.Windows.MessageBox]::Show('Nie wybrano konta break-glass. Polityki CA beda zablokowane do czasu wyboru.', 'Uwaga', 'OK', 'Warning') | Out-Null
+        }
+    }
+    Set-Status 'Połączono. Możesz skanować.'
 })
 
 # ============================================================

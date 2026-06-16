@@ -62,6 +62,7 @@ function Reset-CISContext {
     return $script:Ctx
 }
 function Get-CISContext { if (-not $script:Ctx) { Reset-CISContext | Out-Null }; $script:Ctx }
+function Set-CISContext { param([hashtable]$Ctx) $script:Ctx = $Ctx }
 
 # Uruchamia polecenie uwierzytelnienia w tle (runspace) z przechwytem Write-Host/Write-Warning,
 # wydobywa kod urzadzenia i pokazuje go przez DeviceCodeCallback lub log.
@@ -2254,7 +2255,7 @@ function Get-CISControlDocs { $script:ControlDocs }
 
 Export-ModuleMember -Function `
     Set-CISLogCallback, Set-CISDeviceCodeCallback, Write-CISLog, Confirm-CISModule, New-TestResult, ConvertTo-HtmlText, `
-    Reset-CISContext, Get-CISContext, Connect-CISServices, Disconnect-CISServices, `
+    Reset-CISContext, Get-CISContext, Set-CISContext, Connect-CISServices, Disconnect-CISServices, `
     Get-CISUsers, Get-CISGlobalAdmins, New-CISBreakGlassAccount, Set-CISBreakGlass, `
     Invoke-CISScan, Invoke-CISApply, Remove-CISLegacyPolicies, `
     Get-CISProfileSelection, Import-CISProfile, Save-CISProfile, `

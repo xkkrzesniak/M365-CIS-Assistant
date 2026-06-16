@@ -16,8 +16,9 @@ Format: [Semantic Versioning](https://semver.org/).
 
 ## [1.2.1] — 2026-06-16
 ### Naprawiono
-- **Bug: zielone tło wierszy w DataGrid nigdy nie odpala** — `DataTrigger Value="OK"` zmienione na `Value="Zgodne"` (rzeczywista wartość statusu w `Start-M365CISApp.ps1`).
-- **Bug: `Export-CISReportToWord` pokazuje zawsze 0% zgodności** — `Where-Object Status -eq 'OK'` oraz `switch 'OK'` zmienione na `'Zgodne'` w `M365CISCore.psm1`.
+- **Bug: GUI zamraza się po zalogowaniu** — `Connect-CISServices` wywoływane było synchronicznie na wątku UI. `Connect-ExchangeOnline`, `Connect-SPOService`, `Connect-IPPSSession` blokują wątek na 10–30s. Fix: połączenie przeniesione do background runspace + `DispatcherFrame` do czekania (UI pozostaje aktywne). Microsoft.Graph v2+ i EXO v3+ używają statycznych obiektów .NET współdzielonych między runspace'ami; dodano `Set-CISContext` do synchronizacji kontekstu CIS po zakończeniu.
+- **Bug: zielone tło wierszy w DataGrid nigdy nie odpala** — `DataTrigger Value="OK"` zmienione na `Value="Zgodne"`.
+- **Bug: `Export-CISReportToWord` pokazuje zawsze 0% zgodności** — `Where-Object Status -eq 'OK'` oraz `switch 'OK'` zmienione na `'Zgodne'`.
 - **Bug: `Send-CISReportByEmail` pokazuje zawsze 0 w temacie maila** — ta sama poprawka `'OK'` → `'Zgodne'`.
 
 ---
