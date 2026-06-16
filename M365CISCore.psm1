@@ -2053,7 +2053,7 @@ function Export-CISReportToWord {
     $operator = try { (Get-MgContext).Account } catch { $env:USERNAME }
 
     $total = $Scan.Count
-    $ok    = @($Scan | Where-Object Status -eq 'OK').Count
+    $ok    = @($Scan | Where-Object Status -eq 'Zgodne').Count
     $nok   = @($Scan | Where-Object Status -eq 'NIEZGODNE').Count
     $warn  = @($Scan | Where-Object Status -eq 'WARN').Count
     $pct   = if ($total -gt 0) { [int]([math]::Round($ok / $total * 100)) } else { 0 }
@@ -2169,7 +2169,7 @@ function Export-CISReportToWord {
         $tbl.Cell($r, 5).Range.Text = $row.Aktualnie
 
         $statColor = switch ($row.Status) {
-            'OK'        { $colorGreen }
+            'Zgodne'    { $colorGreen }
             'NIEZGODNE' { $colorRed }
             'WARN'      { $colorOrange }
             default     { 0x000000 }
@@ -2181,7 +2181,7 @@ function Export-CISReportToWord {
 
         # Pastelowe tło wiersza
         $bgColor = switch ($row.Status) {
-            'OK'        { 0xE8F5E9 }
+            'Zgodne'    { 0xE8F5E9 }
             'NIEZGODNE' { 0xFFEBEE }
             'WARN'      { 0xFFF8E1 }
             default     { 0xFFFFFF }
@@ -2220,7 +2220,7 @@ function Send-CISReportByEmail {
     $tenant   = if ($Context.TenantDisplayName) { $Context.TenantDisplayName } else { $Context.TenantInitialDomain }
     $now      = Get-Date -Format 'yyyy-MM-dd HH:mm'
     $total    = $Scan.Count
-    $ok       = @($Scan | Where-Object Status -eq 'OK').Count
+    $ok       = @($Scan | Where-Object Status -eq 'Zgodne').Count
     $nok      = @($Scan | Where-Object Status -eq 'NIEZGODNE').Count
     $pct      = if ($total -gt 0) { [int]([math]::Round($ok / $total * 100)) } else { 0 }
     $subject  = "Raport CIS M365 — $tenant — $now — Zgodnosc: $pct%"

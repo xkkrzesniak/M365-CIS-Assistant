@@ -390,7 +390,7 @@ $xamlText = @'
       <DataGrid.RowStyle>
         <Style TargetType="DataGridRow">
           <Style.Triggers>
-            <DataTrigger Binding="{Binding Status}" Value="OK">
+            <DataTrigger Binding="{Binding Status}" Value="Zgodne">
               <Setter Property="Background" Value="#e8f5e9"/>
             </DataTrigger>
             <DataTrigger Binding="{Binding Status}" Value="NIEZGODNE">

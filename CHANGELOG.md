@@ -14,6 +14,14 @@ Format: [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [1.2.1] — 2026-06-16
+### Naprawiono
+- **Bug: zielone tło wierszy w DataGrid nigdy nie odpala** — `DataTrigger Value="OK"` zmienione na `Value="Zgodne"` (rzeczywista wartość statusu w `Start-M365CISApp.ps1`).
+- **Bug: `Export-CISReportToWord` pokazuje zawsze 0% zgodności** — `Where-Object Status -eq 'OK'` oraz `switch 'OK'` zmienione na `'Zgodne'` w `M365CISCore.psm1`.
+- **Bug: `Send-CISReportByEmail` pokazuje zawsze 0 w temacie maila** — ta sama poprawka `'OK'` → `'Zgodne'`.
+
+---
+
 ## [1.2.0] — 2026-06-10
 ### Dodano
 - **Kreator Start Tenant** (przycisk `★ Kreator Start Tenant`): 5-krokowy kreator WPF dla nowych tenantów — grupuje wyniki skanu wg obszaru (Entra ID → Exchange/MDO → SharePoint → Teams → Podsumowanie), pokazuje szczegółowe opisy z ControlDocs, checkboxy do wyboru poprawek, jedno kliknięcie `Wdroz zaznaczone` aplikuje wszystkie zaznaczone kontrolki jednocześnie. Pre-zaznaczone wszystkie NIEZGODNE.
