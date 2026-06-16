@@ -10,7 +10,20 @@ Format: [Semantic Versioning](https://semver.org/).
 - Porównanie skanów before/after z wykresem trendu
 - Zaplanowane skany + Task Scheduler
 - Integracja z Maester (opcjonalny backend skanu)
-- Kontrolki: `TEAMS-PRESENTER`, `ENTRA-SMARTLOCKOUT`
+
+---
+
+## [1.3.0] — 2026-06-16
+### Dodano
+- **8 nowych kontrolek CIS v6.x** (z 78 do 86 łącznie):
+  - `TEAMS-PRESENTER` (CIS 8.5.1 L1): DesignatedPresenterRoleMode=OrganizerOnlyUserOverride — tylko organizator może prezentować
+  - `ENTRA-SMARTLOCKOUT` (CIS 1.2.5 L1): Smart Lockout threshold≤10, lockoutDuration≥60s — ochrona przed brute-force
+  - `ENTRA-CA-DEVICE` (CIS 5.2.2 L2): CAP04 — CA wymaga urządzenia zgodnego (Intune) lub hybrid-joined
+  - `MDO-SAFEATTACH-SPO` (CIS 2.1.2 L2): Safe Attachments dla SharePoint, OneDrive i Teams (EnableATPForSPOTeamsODB)
+  - `MDO-SAFELINKS-TRACK` (CIS 2.1.1 L1): TrackClicks=true w politykach Safe Links — audyt kliknięć
+  - `EXO-REPORT-JUNK` (CIS 2.6.1 L1): ReportSubmissionPolicy — użytkownicy mogą zgłaszać spam/phish do Microsoft
+  - `SPO-EMAIL-ATTEST` (CIS 7.2.5 L2): EmailAttestationRequired=true — reweryfikacja e-mail dla linków gości co 30 dni
+  - `ENTRA-ADMIN-NOMAILBOX` (CIS 1.1.2 L1): audyt — Global Admins nie powinni mieć licencji Exchange (mailbox)
 
 ---
 

@@ -682,6 +682,14 @@ $script:ControlDocs = @{
     'SPO-LINK-PERMISSION'        = 'DefaultLinkPermission=View: domyślne uprawnienie linku = podgląd (nie edycja). Użytkownik musi świadomie wybrać "Edytuj" przy udostępnianiu. CIS 7.2.4.'
     'TEAMS-LOBBY'                = 'AutoAdmittedUsers=EveryoneInCompanyExcludingGuests: goście i zewnętrzni są zatrzymywani w lobby. Organizator musi ich wpuścić. CIS 8.1.1.'
     'TEAMS-PSTN-LOBBY'           = 'AllowPSTNUsersToBypassLobby=false: osoby dzwoniące przez telefon (PSTN) muszą przejść przez lobby — nie dołączają automatycznie do spotkania. CIS 8.1.2.'
+    'TEAMS-PRESENTER'            = 'DesignatedPresenterRoleMode=OrganizerOnlyUserOverride: domyślnie tylko organizator i współorganizatorzy mogą prezentować (udostępniać ekran, pulpit). Uczestnicy mogą być podwyższeni do prezentera przez organizatora. CIS 8.5.1 L1.'
+    'ENTRA-SMARTLOCKOUT'         = 'Smart Lockout: LockoutThreshold≤10 (blokada po 10 nieudanych próbach), LockoutDurationInSeconds≥60 (blokada min. 60s). Broni przed atakami brute-force i password spray. Domyślne wartości Microsoft są zgodne; niebezpieczne gdy tenant zmienił na zbyt liberalne. CIS 1.2.5 L1.'
+    'ENTRA-CA-DEVICE'            = 'CAP04: Conditional Access wymaga urządzenia zgodnego z Intune (compliantDevice) LUB hybrid Azure AD Joined (domainJoinedDevice). Blokuje dostęp z niezarządzanych urządzeń. Wymaga licencji Entra ID P1+. CIS 5.2.2 L2.'
+    'MDO-SAFEATTACH-SPO'         = 'EnableATPForSPOTeamsODB=true: Microsoft Defender for Office 365 skanuje pliki przesyłane do SharePoint Online, OneDrive i Microsoft Teams. Wykrywa złośliwe pliki zanim użytkownicy je pobiorą. CIS 2.1.2 L2.'
+    'MDO-SAFELINKS-TRACK'        = 'TrackClicks=true w politykach Safe Links: MDO rejestruje kliknięcia w przepisane linki przez użytkowników. Umożliwia audyt i wykrywanie kliknięć w linki złośliwe po incydencie. CIS 2.1.1 L1.'
+    'EXO-REPORT-JUNK'            = 'ReportJunkEnabled + ReportNotJunkEnabled + ReportPhishEnabled=true w ReportSubmissionPolicy: użytkownicy mogą zgłaszać spam, phishing i prawidłowe wiadomości bezpośrednio do Microsoft. Poprawia filtry uczenia maszynowego. CIS 2.6.1 L1.'
+    'SPO-EMAIL-ATTEST'           = 'EmailAttestationRequired=true: osoby, które otrzymały link gościa do SharePoint, muszą ponownie potwierdzić adres e-mail po upłynięciu EmailAttestationReAuthDays (zalecane 30 dni). Zapobiega dostępowi po zmianie właściciela konta. CIS 7.2.5 L2.'
+    'ENTRA-ADMIN-NOMAILBOX'      = 'Global Administratorzy nie powinni mieć licencji Exchange/M365 (brak skrzynki pocztowej). Dedykowane konta admin bez dostępu do poczty zmniejszają powierzchnię ataku — phishing/kompromitacja konta admin nie daje dostępu do danych. CIS 1.1.2 L1.'
 }
 
 # ---------- RAPORT HTML ----------
@@ -2000,6 +2008,215 @@ $ControlRegistry = @(
             Set-CsTeamsMeetingPolicy -Identity Global -AllowPSTNUsersToBypassLobby $false
             Write-CISLog 'TEAMS-PSTN-LOBBY: AllowPSTNUsersToBypassLobby=$false' OK
         }
+    },
+
+    # ---- Teams: Only organizer/co-organizer can present (CIS 8.5.1 L1) ----
+    [pscustomobject]@{
+        Id='TEAMS-PRESENTER'; Service='Teams'; Area='Teams'; Cis='8.5.1'; Level=1
+        Name='Teams: tylko organizator/wspol-organizator moze prezentowac'
+        Test={
+            try {
+                $pol  = Get-CsTeamsMeetingPolicy -Identity Global -ErrorAction Stop
+                $mode = $pol.DesignatedPresenterRoleMode
+                New-TestResult ($mode -in @('OrganizerOnlyUserOverride','OrganizerOnly')) "DesignatedPresenterRoleMode=$mode (zalecane OrganizerOnlyUserOverride)"
+            } catch { New-TestResult $false "Blad: $_" }
+        }
+        Apply={
+            Set-CsTeamsMeetingPolicy -Identity Global -DesignatedPresenterRoleMode OrganizerOnlyUserOverride
+            Write-CISLog 'TEAMS-PRESENTER: DesignatedPresenterRoleMode=OrganizerOnlyUserOverride' OK
+        }
+    },
+
+    # ---- Entra ID: Smart Lockout (CIS 1.2.5 L1) ----
+    [pscustomobject]@{
+        Id='ENTRA-SMARTLOCKOUT'; Service='Graph'; Area='Entra ID'; Cis='1.2.5'; Level=1
+        Name='Entra ID: Smart Lockout — prog blokady ≤10, czas trwania ≥60s'
+        Test={
+            try {
+                $resp = Invoke-MgGraphRequest -Method GET -Uri 'https://graph.microsoft.com/v1.0/settings' -ErrorAction Stop
+                $pwd  = $resp.value | Where-Object { $_.displayName -eq 'Password Rule Settings' }
+                if (-not $pwd) {
+                    return New-TestResult $true 'Uzywa domyslnych wartosci MS (threshold=10, duration=60s) — zgodne'
+                }
+                $thresh = [int](($pwd.values | Where-Object name -eq 'LockoutThreshold').value)
+                $dur    = [int](($pwd.values | Where-Object name -eq 'LockoutDurationInSeconds').value)
+                New-TestResult ($thresh -le 10 -and $dur -ge 60) "LockoutThreshold=$thresh (max 10), LockoutDurationInSeconds=$dur (min 60s)"
+            } catch { New-TestResult $false "Blad: $_" }
+        }
+        Apply={
+            try {
+                $resp   = Invoke-MgGraphRequest -Method GET -Uri 'https://graph.microsoft.com/v1.0/settings' -ErrorAction Stop
+                $pwd    = $resp.value | Where-Object { $_.displayName -eq 'Password Rule Settings' }
+                $vals   = @(
+                    @{ name='LockoutThreshold';         value='10' }
+                    @{ name='LockoutDurationInSeconds'; value='60' }
+                    @{ name='BannedPasswordCheckOnPremisesMode'; value='Audit' }
+                    @{ name='EnableBannedPasswordCheckOnPremises'; value='True' }
+                    @{ name='EnableBannedPasswordCheck'; value='True' }
+                    @{ name='LockoutObservationWindow'; value='60' }
+                )
+                if ($pwd) {
+                    foreach ($v in $vals) {
+                        $existing = $pwd.values | Where-Object name -eq $v.name
+                        if ($existing) { $existing.value = $v.value }
+                    }
+                    Invoke-MgGraphRequest -Method PATCH -Uri "https://graph.microsoft.com/v1.0/settings/$($pwd.id)" `
+                        -Body @{ values = $pwd.values } -ContentType 'application/json' | Out-Null
+                } else {
+                    $templateId = (Invoke-MgGraphRequest -Method GET -Uri 'https://graph.microsoft.com/v1.0/directorySettingTemplates' -ErrorAction Stop).value |
+                        Where-Object displayName -eq 'Password Rule Settings' | Select-Object -First 1 -ExpandProperty id
+                    if ($templateId) {
+                        Invoke-MgGraphRequest -Method POST -Uri 'https://graph.microsoft.com/v1.0/settings' `
+                            -Body @{ templateId=$templateId; values=$vals } -ContentType 'application/json' | Out-Null
+                    }
+                }
+                Write-CISLog 'ENTRA-SMARTLOCKOUT: LockoutThreshold=10, LockoutDurationInSeconds=60' OK
+            } catch { throw }
+        }
+    },
+
+    # ---- Entra ID: CA04 — wymagaj zgodnego lub hybrid-joined urzadzenia (L2) ----
+    [pscustomobject]@{
+        Id='ENTRA-CA-DEVICE'; Service='Graph'; Area='Entra ID'; Cis='5.2.2'; Level=2
+        Name='Conditional Access: wymagaj urzadzenia zgodnego (Intune) lub hybrid-joined (CAP04)'
+        Test={
+            $p = Get-MgIdentityConditionalAccessPolicy -All | Where-Object {
+                $_.State -ne 'disabled' -and
+                ($_.GrantControls.BuiltInControls -contains 'compliantDevice' -or
+                 $_.GrantControls.BuiltInControls -contains 'domainJoinedDevice')
+            }
+            if ($p) { New-TestResult $true ("Polityka: " + $p[0].DisplayName) }
+            else    { New-TestResult $false 'Brak polityki CA wymajacej zgodnego/hybrid-joined urzadzenia' }
+        }
+        Apply={
+            $body = @{
+                displayName   = 'CAP04: Require Compliant or Hybrid Joined Device'
+                state         = $script:Ctx.CaState
+                conditions    = @{
+                    clientAppTypes = @('all')
+                    applications   = @{ includeApplications = @('All') }
+                    users          = @{ includeUsers = @('All'); excludeUsers = @($script:Ctx.BgId) }
+                }
+                grantControls = @{ operator = 'OR'; builtInControls = @('compliantDevice','domainJoinedDevice') }
+            }
+            $ex = Get-MgIdentityConditionalAccessPolicy -All | Where-Object DisplayName -eq $body.displayName
+            if ($ex) { Update-MgIdentityConditionalAccessPolicy -ConditionalAccessPolicyId $ex.Id -BodyParameter $body | Out-Null }
+            else     { New-MgIdentityConditionalAccessPolicy -BodyParameter $body | Out-Null }
+            Write-CISLog "ENTRA-CA-DEVICE: polityka CAP04 utworzona/zaktualizowana (stan: $($script:Ctx.CaState))" OK
+        }
+    },
+
+    # ---- MDO: Safe Attachments dla SPO/OneDrive/Teams (CIS 2.1.2 L2) ----
+    [pscustomobject]@{
+        Id='MDO-SAFEATTACH-SPO'; Service='EXO'; Area='Defender'; Cis='2.1.2'; Level=2
+        Name='MDO: Safe Attachments wlaczone dla SharePoint, OneDrive i Teams'
+        Test={
+            try {
+                $atp = Get-AtpPolicyForO365 -ErrorAction Stop
+                New-TestResult ($atp.EnableATPForSPOTeamsODB -eq $true) "EnableATPForSPOTeamsODB=$($atp.EnableATPForSPOTeamsODB)"
+            } catch { New-TestResult $false "Blad: $_" }
+        }
+        Apply={
+            Set-AtpPolicyForO365 -EnableATPForSPOTeamsODB $true
+            Write-CISLog 'MDO-SAFEATTACH-SPO: EnableATPForSPOTeamsODB=true' OK
+        }
+    },
+
+    # ---- MDO: Safe Links — sledz klikniecia (CIS 2.1.1 L1) ----
+    [pscustomobject]@{
+        Id='MDO-SAFELINKS-TRACK'; Service='EXO'; Area='Defender'; Cis='2.1.1'; Level=1
+        Name='MDO: Safe Links — sledz klikniecia uzytkownikow (TrackClicks=true)'
+        Test={
+            try {
+                $pols = @(Get-SafeLinksPolicy -ErrorAction Stop | Where-Object { $_.IsEnabled })
+                if ($pols.Count -eq 0) { return New-TestResult $false 'Brak aktywnych polityk Safe Links' }
+                $noTrack = @($pols | Where-Object { $_.TrackClicks -ne $true })
+                New-TestResult ($noTrack.Count -eq 0) ("TrackClicks=false w: {0}" -f $(if($noTrack.Count -eq 0){'brak (OK)'}else{($noTrack.Name -join ', ')}))
+            } catch { New-TestResult $false "Blad: $_" }
+        }
+        Apply={
+            $fixed = 0
+            Get-SafeLinksPolicy | Where-Object { $_.IsEnabled -and $_.TrackClicks -ne $true } | ForEach-Object {
+                Set-SafeLinksPolicy -Identity $_.Identity -TrackClicks $true -ErrorAction SilentlyContinue
+                Write-CISLog "MDO-SAFELINKS-TRACK: TrackClicks=true dla '$($_.Name)'" OK
+                $fixed++
+            }
+            if ($fixed -eq 0) { Write-CISLog 'MDO-SAFELINKS-TRACK: wszystkie polityki juz maja TrackClicks=true' OK }
+        }
+    },
+
+    # ---- EXO: Report Junk/Phish wlaczony (CIS 2.6.1 L1) ----
+    [pscustomobject]@{
+        Id='EXO-REPORT-JUNK'; Service='EXO'; Area='Exchange'; Cis='2.6.1'; Level=1
+        Name='EXO: uzytkownicy moga zglaszac spam i phishing do Microsoft'
+        Test={
+            try {
+                $pol = Get-ReportSubmissionPolicy -ErrorAction Stop
+                $ok  = $pol.ReportJunkEnabled -and $pol.ReportNotJunkEnabled -and $pol.ReportPhishEnabled
+                New-TestResult $ok "ReportJunk=$($pol.ReportJunkEnabled), ReportNotJunk=$($pol.ReportNotJunkEnabled), ReportPhish=$($pol.ReportPhishEnabled)"
+            } catch { New-TestResult $false "Blad: $_" }
+        }
+        Apply={
+            $params = @{ ReportJunkEnabled=$true; ReportNotJunkEnabled=$true; ReportPhishEnabled=$true }
+            $pol = Get-ReportSubmissionPolicy -ErrorAction SilentlyContinue
+            if ($pol) { Set-ReportSubmissionPolicy @params }
+            else      { New-ReportSubmissionPolicy @params | Out-Null }
+            Write-CISLog 'EXO-REPORT-JUNK: ReportJunk/NotJunk/Phish=true' OK
+        }
+    },
+
+    # ---- SPO: Email attestation dla udostepnianych linkow (CIS 7.2.5 L2) ----
+    [pscustomobject]@{
+        Id='SPO-EMAIL-ATTEST'; Service='SPO'; Area='SharePoint'; Cis='7.2.5'; Level=2
+        Name='SPO: wymagaj ponownej weryfikacji e-mail dla linkow udostepniania (co 30 dni)'
+        Test={
+            try {
+                $spo = Get-SPOTenant -ErrorAction Stop
+                New-TestResult ($spo.EmailAttestationRequired -eq $true) "EmailAttestationRequired=$($spo.EmailAttestationRequired), ReAuthDays=$($spo.EmailAttestationReAuthDays)"
+            } catch { New-TestResult $false "Blad: $_" }
+        }
+        Apply={
+            Set-SPOTenant -EmailAttestationRequired $true -EmailAttestationReAuthDays 30
+            Write-CISLog 'SPO-EMAIL-ATTEST: EmailAttestationRequired=true, ReAuthDays=30' OK
+        }
+    },
+
+    # ---- Entra ID: Global Admins bez licencji Exchange (CIS 1.1.2 L1) ----
+    [pscustomobject]@{
+        Id='ENTRA-ADMIN-NOMAILBOX'; Service='Graph'; Area='Entra ID'; Cis='1.1.2'; Level=1
+        Name='Entra ID: konta Global Admin nie maja licencji Exchange (dedykowane konta admin)'
+        Test={
+            try {
+                $role   = Get-MgDirectoryRole -Filter "displayName eq 'Global Administrator'" -ErrorAction Stop | Select-Object -First 1
+                if (-not $role) { return New-TestResult $false 'Nie znaleziono roli Global Administrator' }
+                $admins = Get-MgDirectoryRoleMember -DirectoryRoleId $role.Id -ErrorAction Stop
+                # Exchange/M365 plans zawierające mailbox: EXCHANGESTANDARD, EXCHANGEENTERPRISE, ENTERPRISEPREMIUM, SPE_E3, SPE_E5 itp.
+                $exchSkus = @('EXCHANGESTANDARD','EXCHANGEENTERPRISE','ENTERPRISEPREMIUM','STANDARDPACK','ENTERPRISEPACK',
+                              'SPE_E3','SPE_E5','MICROSOFT_BUSINESS_CENTER','O365_BUSINESS_PREMIUM','O365_BUSINESS_ESSENTIALS',
+                              'EXCHANGEARCHIVE','EXCHANGEDESKLESS','M365EDU_A3_FACULTY','M365EDU_A5_FACULTY')
+                $withMailbox = @()
+                foreach ($m in $admins) {
+                    try {
+                        $u = Get-MgUser -UserId $m.Id -Property 'userPrincipalName,assignedLicenses' -ErrorAction Stop
+                        if ($u.AssignedLicenses.Count -gt 0) {
+                            # Sprawdz czy ma SKU z Exchange
+                            $skus = Get-MgSubscribedSku -ErrorAction SilentlyContinue
+                            $hasExch = $u.AssignedLicenses | ForEach-Object {
+                                $skuId = $_.SkuId
+                                $sku = $skus | Where-Object SkuId -eq $skuId | Select-Object -First 1
+                                if ($sku -and ($exchSkus -contains $sku.SkuPartNumber -or $sku.SkuPartNumber -match 'EXCHANGE|ENTERPRISE|M365|O365|SPE_E')) {
+                                    $u.UserPrincipalName
+                                }
+                            } | Select-Object -First 1
+                            if ($hasExch) { $withMailbox += $u.UserPrincipalName }
+                        }
+                    } catch {}
+                }
+                $ok = ($withMailbox.Count -eq 0)
+                New-TestResult $ok ("Global Admins z licencja Exchange: {0}" -f $(if($ok){'brak (OK)'}else{($withMailbox -join ', ')}))
+            } catch { New-TestResult $false "Blad: $_" }
+        }
+        Apply={ Write-CISLog 'ENTRA-ADMIN-NOMAILBOX: Usun licencje Exchange z kont Global Admin lub uzyj dedykowanych kont admin bez licencji uzytkownika. Wymagana akcja reczna.' WARN }
     }
 )
     return $ControlRegistry
