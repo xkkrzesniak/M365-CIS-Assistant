@@ -14,6 +14,12 @@ Format: [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [1.2.2] — 2026-06-16
+### Naprawiono
+- **Refaktor: duplikat kodu skanu** — logika `DispatcherTimer` skanu wyciągnięta do funkcji `Start-CISScan` z parametrem `StatusPrefix`; `btnScan.Add_Click` i reskan po wdrożeniu używają wspólnego kodu.
+- **`btnExportWord`: Word niedostępny** — zamiast generycznego błędu, dialog pyta czy wygenerować raport HTML zamiast Word; SaveFileDialog prefilluje tę samą nazwę pliku z rozszerzeniem `.html`.
+- **`btnEmail`: raport wysyłał tylko skrótowe podsumowanie** — GUI generuje teraz pełny HTML do temp, przekazuje do `Send-CISReportByEmail`, po wysyłce usuwa plik.
+
 ## [1.2.1] — 2026-06-16
 ### Naprawiono
 - **Bug: GUI zamraza się po zalogowaniu** — `Connect-CISServices` wywoływane było synchronicznie na wątku UI. `Connect-ExchangeOnline`, `Connect-SPOService`, `Connect-IPPSSession` blokują wątek na 10–30s. Fix: połączenie przeniesione do background runspace + `DispatcherFrame` do czekania (UI pozostaje aktywne). Microsoft.Graph v2+ i EXO v3+ używają statycznych obiektów .NET współdzielonych między runspace'ami; dodano `Set-CISContext` do synchronizacji kontekstu CIS po zakończeniu.
