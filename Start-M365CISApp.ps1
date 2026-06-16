@@ -664,6 +664,13 @@ $ctrl.btnConnect.Add_Click({
     $connTimer.Start()
     [System.Windows.Threading.Dispatcher]::PushFrame($connFrame)
 
+    # Importuj EXO modul w glownym runspace PRZED zamknieciem bg runspace.
+    # Gdy bg runspace sie zamknie i modul zostanie z niego usuniety, OnRemove nie
+    # wyczysci statycznego tokenu EXO poniewaz modul wciaz jest zaladowany tutaj.
+    if ($connSync.Ctx -and $connSync.Ctx.Connected.EXO) {
+        try { Import-Module ExchangeOnlineManagement -Force -ErrorAction SilentlyContinue } catch {}
+    }
+
     try { $ps.EndInvoke($handle) } catch {}
     $ps.Dispose(); $rs.Close()
 
@@ -676,35 +683,9 @@ $ctrl.btnConnect.Add_Click({
         return
     }
 
-    # Zsynchronizuj kontekst CIS do głównego runspace
+    # Zsynchronizuj kontekst CIS do glownego runspace
     if ($connSync.Ctx) {
         Set-CISContext -Ctx $connSync.Ctx
-
-        # EXO i IPPS (Purview): cmdlety są runspace-lokalne — trzeba zaimportować moduł
-        # i ponownie się połączyć w GŁÓWNYM runspace. MSAL token jest in-process (bez browser popup).
-        $_mgCtx = Get-MgContext -ErrorAction SilentlyContinue
-        $_exoUpn = if ($_mgCtx) { $_mgCtx.Account } else { $null }
-        if ($connSync.Ctx.Connected.EXO -and $_exoUpn) {
-            try {
-                Import-Module ExchangeOnlineManagement -Force -ErrorAction Stop
-                Connect-ExchangeOnline -UserPrincipalName $_exoUpn -ShowBanner:$false -ErrorAction Stop
-            } catch {
-                $win.Dispatcher.Invoke([action]{
-                    $log = $win.FindName('txtLog')
-                    if ($log) { $log.AppendText("[WARN] EXO cmdlety: $_`r`n"); $log.ScrollToEnd() }
-                })
-            }
-        }
-        if ($connSync.Ctx.Connected.Purview -and $_exoUpn) {
-            try {
-                Connect-IPPSSession -UserPrincipalName $_exoUpn -ShowBanner:$false -ErrorAction Stop
-            } catch {
-                $win.Dispatcher.Invoke([action]{
-                    $log = $win.FindName('txtLog')
-                    if ($log) { $log.AppendText("[WARN] IPPS cmdlety: $_`r`n"); $log.ScrollToEnd() }
-                })
-            }
-        }
 
         $c = $connSync.Ctx
         $ctrl.lblTenant.Text = "   Tenant: " + $(if($c.TenantInitialDomain){$c.TenantInitialDomain}else{'(nieznany)'})
